@@ -102,8 +102,8 @@ const LOGO_CECILIA_B64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAeAAAAEC
 const MEDIO_CTA_CTE = "Cuenta Corriente";
 // Medios de cheque: vienen configurados de fábrica y no usan días fijos de acreditación;
 // cada venta o gasto trae el vencimiento de su propio cheque.
-const MEDIO_CHEQUE_TERCEROS = "Cheque de terceros";
-const MEDIO_CHEQUE_PROPIO = "Cheque propio";
+const MEDIO_CHEQUE_TERCEROS = "Cheques de terceros";
+const MEDIO_CHEQUE_PROPIO = "Cheques propios";
 const MEDIOS_CHEQUE = [MEDIO_CHEQUE_TERCEROS, MEDIO_CHEQUE_PROPIO];
 // Medios de canal para ventas online, precargados en Configuración con una estimación de días
 // de acreditación de referencia (ajustable por cada negocio según su pasarela real).
@@ -274,33 +274,33 @@ function arqueosConFilas(data) {
     return { ...a, filas, mediosCaja };
   });
 }
+// Rubro donde la app registra sola las comisiones de los medios de pago (billeteras, tarjetas) al conciliar cobros.
+const RUBRO_COMISIONES_MEDIOS = "Comisiones bancarias y billeteras";
 const RUBROS_DEFAULT = [
-  "Costos Fijos",
-  "Proveedores",
-  "Packaging",
-  "Comunicación y Publicidad",
-  "Sueldo emprendedor",
-  "Sueldo colaboradores",
-  "Formaciones/Capacitaciones",
-  "Gastos Bancarios y de Billeteras",
-  "Comisiones por ventas",
-  "Comisiones Corredores de Pago",
-  "Movilidad",
-  "Otros Gastos",
+  "Capacitación",
+  RUBRO_COMISIONES_MEDIOS,
+  "Comunicación",
+  "Publicidad",
+  "Gastos salón",
+  "Honorarios emprendedor",
+  "Honorarios staff",
+  "Insumos para venta",
+  "Insumos uso propio",
+  "Inversión",
+  "Otros gastos",
 ];
 const RUBRO_TIPO_DEFAULT = {
-  "Costos Fijos": "fijo",
-  "Proveedores": "variable",
-  "Packaging": "variable",
-  "Comunicación y Publicidad": "fijo",
-  "Sueldo emprendedor": "fijo",
-  "Sueldo colaboradores": "fijo",
-  "Formaciones/Capacitaciones": "fijo",
-  "Gastos Bancarios y de Billeteras": "variable",
-  "Comisiones por ventas": "variable",
-  "Comisiones Corredores de Pago": "variable",
-  "Movilidad": "variable",
-  "Otros Gastos": "variable",
+  "Capacitación": "variable",
+  [RUBRO_COMISIONES_MEDIOS]: "variable",
+  "Comunicación": "variable",
+  "Publicidad": "variable",
+  "Gastos salón": "fijo",
+  "Honorarios emprendedor": "fijo",
+  "Honorarios staff": "fijo",
+  "Insumos para venta": "variable",
+  "Insumos uso propio": "variable",
+  "Inversión": "variable",
+  "Otros gastos": "variable",
 };
 
 function defaultData() {
@@ -310,11 +310,14 @@ function defaultData() {
     productos: [],
     servicios: [], // servicios y sillón/gabinete: [{ id, tipo: "servicio"|"sillon", nombre, codigo, familia, precioMinorista, precioMayorista, comisionPct }]
     familias: ["General"],
-    puntosVenta: ["A", "B", "C"],
+    puntosVenta: [], // sin puntos de venta por defecto: se agregan en Configuración si hacen falta
     rubros: [...RUBROS_DEFAULT],
     rubroTipo: { ...RUBRO_TIPO_DEFAULT },
-    medios: ["Efectivo", "Mercado Pago", "Banco XX", "NX", ...MEDIOS_CHEQUE, ...MEDIOS_ECOMMERCE_DEFAULT, MEDIO_CTA_CTE],
-    medioConfig: { ...MEDIO_CONFIG_ECOMMERCE_DEFAULT },
+    medios: ["MP", "Efectivo", MEDIO_CHEQUE_PROPIO, MEDIO_CHEQUE_TERCEROS, MEDIO_CTA_CTE],
+    medioConfig: {},
+    // Versión peluquerías: no se agregan los medios de ecommerce ni se re-agregan los cheques (ya están arriba).
+    _migroCanalesEcommerce: true,
+    _migroCheques: true,
     listaLabels: { ...LISTA_LABEL_DEFAULT },
     cantidadListas: 2,
     staff: [], // [{ id, nombre }], hasta 6 personas
@@ -341,9 +344,9 @@ function defaultData() {
 export function normalizarData(parcial) {
   const merged = { ...defaultData(), ...(parcial || {}) };
   if (!merged.medios.includes(MEDIO_CTA_CTE)) merged.medios = [...merged.medios, MEDIO_CTA_CTE];
-  if (!merged.rubros.includes("Comisiones Corredores de Pago")) {
-    merged.rubros = [...merged.rubros, "Comisiones Corredores de Pago"];
-    merged.rubroTipo = { ...merged.rubroTipo, "Comisiones Corredores de Pago": "variable" };
+  if (!merged.rubros.includes(RUBRO_COMISIONES_MEDIOS)) {
+    merged.rubros = [...merged.rubros, RUBRO_COMISIONES_MEDIOS];
+    merged.rubroTipo = { ...merged.rubroTipo, [RUBRO_COMISIONES_MEDIOS]: "variable" };
   }
   if (!merged.medioConfig) merged.medioConfig = {};
   if (!merged.perfilesImportacion) merged.perfilesImportacion = [];
@@ -1672,11 +1675,13 @@ function VentasView({ data, update, esAsesora }) {
                 </Select>
               </Field>
             )}
-            <Field label="Punto de venta">
-              <Select value={orden.puntoVenta} onChange={(e) => setOrden({ ...orden, puntoVenta: e.target.value })}>
-                {data.puntosVenta.map((pv) => <option key={pv} value={pv}>{pv}</option>)}
-              </Select>
-            </Field>
+            {data.puntosVenta.length > 0 && (
+              <Field label="Punto de venta">
+                <Select value={orden.puntoVenta} onChange={(e) => setOrden({ ...orden, puntoVenta: e.target.value })}>
+                  {data.puntosVenta.map((pv) => <option key={pv} value={pv}>{pv}</option>)}
+                </Select>
+              </Field>
+            )}
             <Field label="Medio de pago">
               <Select value={orden.medioPago} onChange={(e) => setOrden({ ...orden, medioPago: e.target.value })}>
                 {data.medios.map((m) => <option key={m} value={m}>{m}</option>)}
@@ -3336,7 +3341,7 @@ function construirConciliacionDesdeArchivo(archivo, mapeo, data) {
     gastosNuevos.push({
       id: uid(),
       fecha: fechaAcreditacion,
-      rubro: "Comisiones Corredores de Pago",
+      rubro: RUBRO_COMISIONES_MEDIOS,
       detalle: `Comisión sobre orden ${idExterno} (importado, ${coincidencias.length} línea${coincidencias.length === 1 ? "" : "s"})`,
       monto: comisionReal,
       medioPago: coincidencias[0].v.medioPago,
@@ -4106,10 +4111,31 @@ function armarImportacionPeluqueria(wb, data) {
   const esCtaCte = (m) => ["debe", "cuenta corriente", "cuenta corriente clientes", "cta cte", "cta. cte.", "ctacte"].includes(norm(m));
   const debeVentas = [];
   const debeGastos = [];
-  const union = (actual, nuevos) => {
-    const out = [...(actual || [])];
-    nuevos.forEach((n) => { if (n && !out.some((x) => norm(x) === norm(n))) out.push(n); });
-    return out;
+  // Listas "canónicas": si el nombre ya existe (sin importar mayúsculas ni tildes) se usa el que ya está, y si
+  // es nuevo se agrega. Así nunca se duplican medios, rubros, familias ni puntos de venta.
+  const canonLista = (actual) => {
+    const items = [...(actual || [])];
+    const mapa = new Map(items.map((x) => [norm(x), x]));
+    return {
+      items,
+      get: (n) => {
+        const t = txt(n);
+        if (!t) return "";
+        const k = norm(t);
+        if (!mapa.has(k)) { mapa.set(k, t); items.push(t); }
+        return mapa.get(k);
+      },
+    };
+  };
+  const cMedios = canonLista(data.medios);
+  const cRubros = canonLista(data.rubros);
+  const cFam = canonLista(data.familias);
+  const cPuntos = canonLista(data.puntosVenta);
+  const rubroTipo = { ...(data.rubroTipo || {}) };
+  // Porcentajes escritos como fracción (0,4 = 40%): si TODOS los valores de la columna son <= 1, se multiplican por 100.
+  const columnaEsFraccion = (filas, exactos, parciales) => {
+    const vals = filas.map((f) => aPorcentaje(f, exactos, parciales)).filter((v) => v !== "");
+    return vals.length > 0 && vals.every((v) => v > 0 && v <= 1);
   };
   const nuevo = {
     ...data,
@@ -4119,7 +4145,7 @@ function armarImportacionPeluqueria(wb, data) {
     ventas: [...(data.ventas || [])],
     gastos: [...(data.gastos || [])],
   };
-  const res = { config: false, staff: 0, productos: 0, servicios: 0, ventas: 0, gastos: 0 };
+  const res = { config: false, staff: 0, productos: 0, servicios: 0, alquileres: 0, ventas: 0, gastos: 0 };
   let leyoAlgo = false;
 
   // ---- Config: listas en columnas (Staff, Medios de pago, Rubros, Tipo de rubro, Familias, Puntos de venta)
@@ -4136,20 +4162,17 @@ function armarImportacionPeluqueria(wb, data) {
         nuevo.staff.push({ id: uid(), nombre: n });
         res.staff++;
       });
-      nuevo.medios = union(data.medios, lista(["medios de pago", "medios"]).filter((m) => !esCtaCte(m)));
-      nuevo.familias = union(data.familias, lista(["familias", "familia"]));
-      nuevo.puntosVenta = union(data.puntosVenta, lista(["puntos de venta", "punto de venta"]));
-      const rubroTipo = { ...(data.rubroTipo || {}) };
-      const rubrosNuevos = [];
+      lista(["medios de pago", "medios"]).filter((m) => !esCtaCte(m)).forEach((m) => cMedios.get(m));
+      lista(["familias", "familia"]).forEach((m) => cFam.get(m));
+      lista(["puntos de venta", "punto de venta"]).forEach((m) => cPuntos.get(m));
       filas.forEach((f) => {
         const r = txt(valorCol(f, ["rubros", "rubro", "rubros de gasto"]));
         if (!r) return;
-        rubrosNuevos.push(r);
+        const nombre = cRubros.get(r);
         const t = txt(valorCol(f, ["tipo de rubro", "tipo"]));
-        if (t) rubroTipo[r] = normalizarTexto(t).startsWith("f") ? "fijo" : "variable";
+        // si el rubro ya tenía tipo (por ejemplo, de los rubros por defecto), no se pisa
+        if (t && !rubroTipo[nombre]) rubroTipo[nombre] = normalizarTexto(t).startsWith("f") ? "fijo" : "variable";
       });
-      nuevo.rubros = union(data.rubros, rubrosNuevos);
-      nuevo.rubroTipo = rubroTipo;
     }
   }
 
@@ -4165,7 +4188,8 @@ function armarImportacionPeluqueria(wb, data) {
       const idx = new Map(nuevo.productos.map((p, i) => [norm(p.nombre), i]));
       const vistos = new Set();
       let sinPrecio = 0, repetidos = 0;
-      const famNuevas = [];
+      const comFrac = columnaEsFraccion(filas, ["% comision", "comision"], ["comision"]);
+      if (comFrac) avisos.push("Los % de comisión de Productos parecían fracciones (0,05 = 5%); se interpretaron como porcentaje.");
       filas.forEach((f) => {
         let nombre = txt(valorCol(f, ["nombre", "nombre producto", "producto", "descripcion"], ["nombre"]));
         if (!nombre) return;
@@ -4173,8 +4197,7 @@ function armarImportacionPeluqueria(wb, data) {
         if (pres && !norm(nombre).includes(norm(pres))) nombre = `${nombre} ${pres}`;
         let marca = txt(valorCol(f, ["marca"], ["marca"]));
         if (marca) { const k = norm(marca); if (!marcas.has(k)) marcas.set(k, marca); marca = marcas.get(k); }
-        const familia = txt(valorCol(f, ["familia"])) || "General";
-        famNuevas.push(familia);
+        const familia = cFam.get(txt(valorCol(f, ["familia"])) || "General");
         const costo = aNumero(valorCol(f, ["costo"], ["costo"]));
         const markup = aPorcentaje(f, ["% sobre costo", "% aumento", "markup"], ["sobre costo", "aumento"]);
         const p1 = aNumero(valorCol(f, ["precio lista 1", "lista 1", "precio de venta", "precio", "minorista"], ["lista 1", "minorista", "precio de venta"]));
@@ -4188,7 +4211,7 @@ function armarImportacionPeluqueria(wb, data) {
           marca,
           costo,
           markupPct: markup,
-          comisionPct: aPorcentaje(f, ["% comision", "comision"], ["comision"]),
+          comisionPct: (() => { const c = aPorcentaje(f, ["% comision", "comision"], ["comision"]); return comFrac && c !== "" ? Math.round(c * 10000) / 100 : c; })(),
           soloInterno: esSiImp(valorCol(f, ["solo uso interno", "uso interno", "solo interno"], ["uso interno"])),
           precioMinorista: manualL1 ? p1 : 0,
           precioMayorista: manualL2 ? p2 : 0,
@@ -4212,7 +4235,6 @@ function armarImportacionPeluqueria(wb, data) {
         }
         res.productos++;
       });
-      nuevo.familias = union(nuevo.familias || data.familias, famNuevas);
       if (sinPrecio) avisos.push(`${sinPrecio} producto${sinPrecio === 1 ? "" : "s"} quedaron sin precio (la planilla no trae precio, ni costo con % sobre costo).`);
       if (repetidos) avisos.push(repetidos === 1 ? "1 producto aparecía repetido en la planilla; quedó el último." : `${repetidos} productos aparecían repetidos en la planilla; quedó el último.`);
     }
@@ -4225,13 +4247,18 @@ function armarImportacionPeluqueria(wb, data) {
     if (filas.length) {
       leyoAlgo = true;
       const idx = new Map(nuevo.servicios.map((sv, i) => [(sv.tipo || "servicio") + "|" + norm(sv.nombre), i]));
-      const famNuevas = [];
+      const comFrac = columnaEsFraccion(filas, ["% comision", "comision"], ["comision"]);
+      if (comFrac) avisos.push("Los % de comisión de Servicios parecían fracciones (0,4 = 40%); se interpretaron como porcentaje.");
       filas.forEach((f) => {
         const nombre = txt(valorCol(f, ["nombre", "servicio", "detalle"], ["nombre"]));
         if (!nombre) return;
-        const tipo = /sillon|gabinete|alquiler/.test(normalizarTexto(txt(valorCol(f, ["tipo"])))) ? "sillon" : "servicio";
-        const familia = txt(valorCol(f, ["familia"])) || "General";
-        famNuevas.push(familia);
+        const familiaTxt = txt(valorCol(f, ["familia"]));
+        const tipoTxt = normalizarTexto(txt(valorCol(f, ["tipo"])));
+        // Si falta el Tipo: la familia "Servicios" (o sin familia) es un servicio; cualquier otra familia es sillón/gabinete.
+        const tipo = tipoTxt
+          ? (/sillon|gabinete|alquiler/.test(tipoTxt) ? "sillon" : "servicio")
+          : (!familiaTxt || norm(familiaTxt) === "servicios" ? "servicio" : "sillon");
+        const familia = cFam.get(familiaTxt || "General");
         const p1 = aNumero(valorCol(f, ["precio lista 1", "lista 1", "precio", "precio de lista"], ["lista 1"]));
         const p2 = aNumero(valorCol(f, ["precio lista 2", "lista 2"], ["lista 2"]));
         const k = tipo + "|" + norm(nombre);
@@ -4244,13 +4271,15 @@ function armarImportacionPeluqueria(wb, data) {
           precioMinorista: p1 === "" ? 0 : p1,
           precioMayorista: p2 === "" ? 0 : p2,
           manualL2: p2 !== "" && p2 > 0,
-          ...(tipo === "servicio" ? { comisionPct: aPorcentaje(f, ["% comision", "comision"], ["comision"]) } : {}),
+          ...(tipo === "servicio"
+            ? { comisionPct: (() => { const c = aPorcentaje(f, ["% comision", "comision"], ["comision"]); return comFrac && c !== "" ? Math.round(c * 10000) / 100 : c; })() }
+            : {}),
         };
         if (idx.has(k)) nuevo.servicios[idx.get(k)] = item;
         else { idx.set(k, nuevo.servicios.length); nuevo.servicios.push(item); }
         res.servicios++;
+        if (tipo === "sillon") res.alquileres++;
       });
-      nuevo.familias = union(nuevo.familias || data.familias, famNuevas);
     }
   }
 
@@ -4264,16 +4293,19 @@ function armarImportacionPeluqueria(wb, data) {
   const servNoEnc = new Set();
   const prodNoEnc = new Set();
   const nuevasVentas = [];
-  const mediosVentas = [];
-  const puntosVentas = [];
   const agregarLinea = (o) => {
     const cantidad = o.cantidad > 0 ? o.cantidad : 1;
     const staffObj = o.staff ? staffPorNombre.get(norm(o.staff)) : null;
     if (o.staff && !staffObj) sinStaff.set(o.staff, (sinStaff.get(o.staff) || 0) + 1);
     // Comisión del profesional: % actual del servicio/producto sobre lo cobrado, congelada al importar.
     const pct = staffObj && o.tipoItem !== "sillon" ? Number(o.item?.comisionPct) || 0 : 0;
-    if (o.medio) mediosVentas.push(o.medio);
-    if (o.punto) puntosVentas.push(o.punto);
+    let comPct = pct;
+    let comMonto = Math.round(o.monto * pct) / 100;
+    // Si la planilla trae la comisión ya calculada (columna Comisión), se usa tal cual; el % se deduce del monto.
+    if (staffObj && o.tipoItem !== "sillon" && o.comision !== undefined && o.comision !== "") {
+      comMonto = Math.round(Number(o.comision) * 100) / 100;
+      comPct = o.monto > 0 ? Math.round((comMonto / o.monto) * 10000) / 100 : 0;
+    }
     nuevasVentas.push({
       id: uid(),
       fecha: o.fecha,
@@ -4281,16 +4313,16 @@ function armarImportacionPeluqueria(wb, data) {
       productoNombre: o.nombre,
       familia: o.item?.familia || "General",
       cantidad,
-      puntoVenta: o.punto || "Importado",
+      puntoVenta: o.punto ? cPuntos.get(o.punto) : (cPuntos.items[0] || ""),
       lista: "importado",
       listaLabel: "Importado",
       precioUnitario: o.monto / cantidad,
       totalBruto: o.monto,
       descuentoMonto: 0,
       total: o.monto,
-      medioPago: o.medio || "",
+      medioPago: o.medio ? cMedios.get(o.medio) : "",
       tipoItem: o.tipoItem,
-      ...(staffObj ? { staffId: staffObj.id, staffNombre: staffObj.nombre, comisionStaffPct: pct, comisionStaffMonto: Math.round(o.monto * pct) / 100 } : {}),
+      ...(staffObj ? { staffId: staffObj.id, staffNombre: staffObj.nombre, comisionStaffPct: comPct, comisionStaffMonto: comMonto } : {}),
       ...(o.detalle ? { detalle: o.detalle } : {}),
     });
   };
@@ -4314,6 +4346,7 @@ function armarImportacionPeluqueria(wb, data) {
       const montoServ = aNumero(valorCol(f, ["monto servicio"], ["monto serv"])) || 0;
       const montoProd = aNumero(valorCol(f, ["monto producto"], ["monto prod"])) || 0;
       const total = aNumero(valorCol(f, ["total"])) || 0;
+      const comFila = aNumero(valorCol(f, ["comision"])); // monto de comisión ya calculado en la planilla (opcional)
       const cant = aNumero(valorCol(f, ["cantidad", "unidades"])) || 1;
       const medio = txt(valorCol(f, ["medio de pago", "medio"], ["medio"]));
       const punto = txt(valorCol(f, ["punto de venta"]));
@@ -4329,13 +4362,13 @@ function armarImportacionPeluqueria(wb, data) {
       if (servicio && mS > 0) {
         const it = servPorNombre.get(norm(servicio));
         if (!it) servNoEnc.add(servicio);
-        agregarLinea({ fecha, nombre: servicio, item: it, tipoItem: it?.tipo === "sillon" ? "sillon" : "servicio", cantidad: cant, monto: mS, medio, punto, staff, detalle: obs });
+        agregarLinea({ fecha, nombre: servicio, item: it, tipoItem: it?.tipo === "sillon" ? "sillon" : "servicio", cantidad: cant, monto: mS, medio, punto, staff, detalle: obs, comision: comFila });
         creo = true;
       }
       if (producto && mP > 0) {
         const it = prodPorNombre.get(norm(producto));
         if (!it) prodNoEnc.add(producto);
-        agregarLinea({ fecha, nombre: producto, item: it, tipoItem: "producto", cantidad: servicio ? 1 : cant, monto: mP, medio, punto, staff, detalle: creo ? "" : obs });
+        agregarLinea({ fecha, nombre: producto, item: it, tipoItem: "producto", cantidad: servicio ? 1 : cant, monto: mP, medio, punto, staff, detalle: creo ? "" : obs, comision: creo ? "" : comFila });
         creo = true;
       }
       if (!creo) {
@@ -4379,9 +4412,6 @@ function armarImportacionPeluqueria(wb, data) {
     leyoAlgo = true;
     res.ventas = nuevasVentas.length;
     nuevo.ventas = [...nuevo.ventas, ...nuevasVentas];
-    nuevo.medios = union(nuevo.medios || data.medios, mediosVentas);
-    nuevo.puntosVenta = union(nuevo.puntosVenta || data.puntosVenta, puntosVentas);
-    nuevo.familias = union(nuevo.familias || data.familias, nuevasVentas.map((v) => v.familia));
   }
 
   // ---- Egresos
@@ -4389,37 +4419,37 @@ function armarImportacionPeluqueria(wb, data) {
   if (sEgr) {
     const filas = leerFilasHoja(sEgr, ["fecha"]);
     const nuevos = [];
-    const rubrosEg = [];
-    const mediosEg = [];
     let sinFecha = 0;
     filas.forEach((f) => {
       const fecha = fechaValida(valorCol(f, ["fecha"], ["fecha"]));
       const monto = aNumero(valorCol(f, ["monto", "importe"], ["monto"])) || 0;
       if (!fecha || monto <= 0) { if (monto > 0) sinFecha++; return; }
-      const rubro = txt(valorCol(f, ["rubro", "categoria de gasto", "categoria"], ["rubro", "categoria"])) || "Otros";
+      const rubro = txt(valorCol(f, ["rubro", "categoria de gasto", "categoria"], ["rubro", "categoria"])) || "Otros gastos";
       const medio = txt(valorCol(f, ["medio de pago", "medio"], ["medio"]));
       const detalleEg = txt(valorCol(f, ["detalle egreso", "detalle"], ["detalle"]));
       if (esCtaCte(medio)) { debeGastos.push({ fecha, nombre: detalleEg ? `${rubro} – ${detalleEg}` : rubro, monto }); return; }
-      rubrosEg.push(rubro);
-      if (medio) mediosEg.push(medio);
-      nuevos.push({ id: uid(), fecha, rubro, detalle: detalleEg, monto, medioPago: medio });
+      nuevos.push({ id: uid(), fecha, rubro: cRubros.get(rubro), detalle: detalleEg, monto, medioPago: medio ? cMedios.get(medio) : "" });
     });
     if (nuevos.length) {
       leyoAlgo = true;
       res.gastos = nuevos.length;
       nuevo.gastos = [...nuevo.gastos, ...nuevos];
-      nuevo.rubros = union(nuevo.rubros || data.rubros, rubrosEg);
-      nuevo.medios = union(nuevo.medios || data.medios, mediosEg);
     }
     if (sinFecha) avisos.push(sinFecha === 1 ? "1 fila de Egresos sin fecha válida no se importó." : `${sinFecha} filas de Egresos sin fecha válida no se importaron.`);
   }
+
+  nuevo.medios = cMedios.items;
+  nuevo.rubros = cRubros.items;
+  nuevo.familias = cFam.items;
+  nuevo.puntosVenta = cPuntos.items;
+  nuevo.rubroTipo = rubroTipo;
 
   if (sinStaff.size) {
     const det = [...sinStaff.entries()].map(([n, c]) => `"${n}" (${c})`).join(", ");
     avisos.push(`Profesionales que no coinciden con el Staff (quedaron sin asignar y sin comisión): ${det}.`);
   }
   if (servNoEnc.size) avisos.push(`Servicios o alquileres que no están en la solapa Servicios (se cargaron igual, sin comisión): ${[...servNoEnc].slice(0, 8).join(", ")}${servNoEnc.size > 8 ? "…" : ""}.`);
-  if (prodNoEnc.size) avisos.push(`${prodNoEnc.size} producto${prodNoEnc.size === 1 ? "" : "s"} vendidos no coinciden con ningún nombre de Productos (se cargaron igual, sin vínculo con el stock): ${[...prodNoEnc].slice(0, 6).join(", ")}${prodNoEnc.size > 6 ? "…" : ""}.`);
+  if (prodNoEnc.size) avisos.push(`${prodNoEnc.size === 1 ? "1 producto vendido no coincide" : `${prodNoEnc.size} productos vendidos no coinciden`} con ningún nombre de Productos (se cargaron igual, sin vínculo con el stock): ${[...prodNoEnc].slice(0, 6).join(", ")}${prodNoEnc.size > 6 ? "…" : ""}.`);
   if (res.ventas) avisos.push("Las ventas importadas no modifican el stock: el stock sale de la columna Stock de Productos.");
   // Pendientes de carga manual (medio "Debe" = cuenta corriente de clientes). Van primero para que se vean.
   const detalleDebe = (arr) => {
@@ -4488,7 +4518,7 @@ function ImportarPeluqueria({ data, update }) {
           <ul style={{ fontSize: 14, color: C.ink, lineHeight: 1.9, paddingLeft: 18 }}>
             {r.config && <li>Configuración: {r.staff} persona{r.staff === 1 ? "" : "s"} nueva{r.staff === 1 ? "" : "s"} en el Staff, más medios de pago, rubros, familias y puntos de venta</li>}
             {r.productos > 0 && <li>{r.productos} productos (marca, costo, % sobre costo, stock)</li>}
-            {r.servicios > 0 && <li>{r.servicios} servicios y alquileres de sillón/gabinete</li>}
+            {r.servicios > 0 && <li>{r.servicios - r.alquileres} servicio{r.servicios - r.alquileres === 1 ? "" : "s"} y {r.alquileres} alquiler{r.alquileres === 1 ? "" : "es"} de sillón/gabinete</li>}
             {r.ventas > 0 && <li>{r.ventas} ventas históricas (con profesional y comisión congelada)</li>}
             {r.gastos > 0 && <li>{r.gastos} gastos históricos</li>}
           </ul>
@@ -5193,7 +5223,7 @@ function CobrosPendientes({ data, update }) {
     const gasto = comisionReal === 0 ? null : {
       id: uid(),
       fecha: fechaReal,
-      rubro: "Comisiones Corredores de Pago",
+      rubro: RUBRO_COMISIONES_MEDIOS,
       detalle: `Comisión sobre ${seleccionadas.length} venta${seleccionadas.length === 1 ? "" : "s"} acreditadas el ${fechaReal} (${medioSel})`,
       monto: comisionReal,
       medioPago: medioSel,
