@@ -8,7 +8,7 @@ import {
   Plus, Trash2, Upload, Package, ShoppingCart, Receipt,
   BarChart3, Settings, X, Check, AlertTriangle, PackagePlus, Pencil,
   Download, Wallet, ArrowLeftRight, HelpCircle, MessageSquarePlus,
-  ChevronDown, ChevronRight, Users, Menu, ArrowLeft, Search,
+  ChevronDown, ChevronRight, Users, Menu, ArrowLeft, Search, Scissors,
 } from "lucide-react";
 
 const C = {
@@ -84,7 +84,14 @@ function recalcularProductos(data) {
     if (n1 === (Number(p.precioMinorista) || 0) && n2 === (Number(p.precioMayorista) || 0)) return p;
     return { ...p, precioMinorista: n1, precioMayorista: n2 };
   });
-  return { ...data, productos };
+  // Servicios y Sillón/Gab: no tienen costo; solo la Lista 2 se calcula sola desde la Lista 1.
+  const servicios = (data.servicios || []).map((sv) => {
+    const c = calcularPrecios({ ...sv, costo: "", markupPct: "" }, data);
+    const n2 = Number(c.precioMayorista) || 0;
+    if (n2 === (Number(sv.precioMayorista) || 0)) return sv;
+    return { ...sv, precioMayorista: n2 };
+  });
+  return { ...data, productos, servicios };
 }
 
 const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
@@ -301,6 +308,7 @@ function defaultData() {
     nombreNegocio: "",
     linkInstructivo: "",
     productos: [],
+    servicios: [], // servicios y sillón/gabinete: [{ id, tipo: "servicio"|"sillon", nombre, codigo, familia, precioMinorista, precioMayorista, comisionPct }]
     familias: ["General"],
     puntosVenta: ["A", "B", "C"],
     rubros: [...RUBROS_DEFAULT],
@@ -601,6 +609,7 @@ function Sidebar({ tab, setTab, nombreNegocio, open, onClose, stockBajoCount = 0
     { id: "gastos", label: "Gastos", icon: Receipt },
     { id: "movimientos", label: "Movimientos de Caja", icon: ArrowLeftRight },
     { id: "clientes", label: "Clientes", icon: Users },
+    { id: "staff", label: "Staff", icon: Scissors },
     { id: "arqueo", label: "Arqueo de Caja", icon: Wallet },
     { id: "productos", label: "Productos y Stock", icon: Package, badge: stockBajoCount },
     { id: "importar", label: "Importar Excel", icon: Upload },
@@ -1265,6 +1274,9 @@ function VentasView({ data, update, esAsesora }) {
 
   const [carrito, setCarrito] = useState([]);
   const [item, setItem] = useState({ productoTexto: "", cantidad: 1, precioUnitario: 0 });
+  const [selId, setSelId] = useState(null); // ítem elegido en el buscador (por si dos ítems tienen el mismo nombre)
+  const staff = data.staff || [];
+  const [staffDefault, setStaffDefault] = useState(""); // profesional que se asigna a cada línea nueva (se puede cambiar por línea)
   const [orden, setOrden] = useState({
     fecha: todayStr(),
     puntoVenta: data.puntosVenta[0] || "",
@@ -1284,11 +1296,21 @@ function VentasView({ data, update, esAsesora }) {
   const [localError, setLocalError] = useState("");
   const [justSaved, setJustSaved] = useState(false);
 
+  // Todo lo que se puede vender: productos, combos, servicios y sillón/gabinete.
+  const catalogo = [
+    ...data.productos.filter((p) => !p.soloInterno).map((p) => ({ ...p, tipoItem: esCombo(p) ? "combo" : "producto" })),
+    ...(data.servicios || []).map((sv) => ({ ...sv, tipoItem: sv.tipo === "sillon" ? "sillon" : "servicio" })),
+  ];
   const textoBusqueda = item.productoTexto.trim().toLowerCase();
-  const productoItem = data.productos.find(
-    (p) => (p.codigo && p.codigo.trim().toLowerCase() === textoBusqueda) || p.nombre.trim().toLowerCase() === textoBusqueda
-  );
-  const esItemCombo = esCombo(productoItem);
+  const elegido = selId ? catalogo.find((p) => p.id === selId && p.nombre.trim().toLowerCase() === textoBusqueda) : null;
+  const productoItem =
+    elegido ||
+    catalogo.find((p) => (p.codigo && p.codigo.trim().toLowerCase() === textoBusqueda) || p.nombre.trim().toLowerCase() === textoBusqueda);
+  const tipoItem = productoItem?.tipoItem;
+  const esItemCombo = tipoItem === "combo";
+  const itemSinStock = tipoItem === "servicio" || tipoItem === "sillon";
+  // Servicio o sillón/gab sin precio de lista (por ejemplo depilación o una seña): el monto se escribe al vender.
+  const montoLibre = itemSinStock && !(Number(productoItem?.[LISTA_CAMPO[orden.lista]]) > 0);
   const stockMaxCombo = esItemCombo ? stockDisponibleCombo(productoItem, data.productos) : null;
   const combosInsuficientes = esItemCombo && Number(item.cantidad) > stockMaxCombo;
   const esCtaCte = orden.medioPago === MEDIO_CTA_CTE;
@@ -1301,13 +1323,14 @@ function VentasView({ data, update, esAsesora }) {
       const campo = LISTA_CAMPO[orden.lista];
       setItem((f) => ({ ...f, precioUnitario: productoItem[campo] || 0 }));
     }
-  }, [item.productoTexto, orden.lista]); // eslint-disable-line
+  }, [item.productoTexto, orden.lista, selId]); // eslint-disable-line
 
   function agregarItem() {
     if (!productoItem) return;
     const cantidad = Number(item.cantidad) || 0;
     const precioUnitario = Number(item.precioUnitario) || 0;
     if (!cantidad) return;
+    if (montoLibre && !precioUnitario) { setLocalError("Este ítem no tiene precio de lista: escribí el monto a cobrar."); return; }
     if (esItemCombo && cantidad > stockDisponibleCombo(productoItem, data.productos)) return;
     // Precio y (si es combo) los componentes quedan "congelados" en el momento de agregar
     // a la venta, igual que ya se congela el precio/descuento de un producto normal.
@@ -1320,6 +1343,8 @@ function VentasView({ data, update, esAsesora }) {
             nombre: prod?.nombre || "(producto eliminado)",
             familia: prod?.familia || "General",
             precioReferencia: Number(prod?.precioMinorista || 0),
+            costo: Number(prod?.costo) || 0, // costo congelado (para el Estado de Resultados)
+            comisionPct: Number(prod?.comisionPct) || 0, // % de comisión del producto, congelado
           };
         })
       : null;
@@ -1337,9 +1362,20 @@ function VentasView({ data, update, esAsesora }) {
         subtotal: cantidad * precioUnitario,
         esCombo: esItemCombo,
         componentes: componentesSnapshot,
+        tipoItem,
+        // Profesional, % de comisión y costo quedan "congelados" en la línea, igual que el precio:
+        // si después se cambian en Productos o Servicios, las ventas ya cargadas no se modifican.
+        staffId: tipoItem === "sillon" ? "" : staffDefault,
+        comisionStaffPct: tipoItem === "sillon" || esItemCombo ? 0 : Number(productoItem.comisionPct) || 0,
+        costoUnitario: itemSinStock || esItemCombo ? 0 : Number(productoItem.costo) || 0,
+        detalle: "",
       },
     ]);
+    setSelId(null);
     setItem((f) => ({ ...f, productoTexto: "", cantidad: 1 }));
+  }
+  function cambiarItemCarrito(tempId, cambios) {
+    setCarrito((c) => c.map((it) => (it.tempId === tempId ? { ...it, ...cambios } : it)));
   }
   function quitarItem(tempId) {
     setCarrito(carrito.filter((it) => it.tempId !== tempId));
@@ -1355,6 +1391,7 @@ function VentasView({ data, update, esAsesora }) {
     try {
       if (carrito.length === 0) { setLocalError("Agregá al menos un producto antes de registrar."); return; }
       if (esCtaCte && !orden.clienteId) { setLocalError("Elegí un cliente para una venta a Cuenta Corriente."); return; }
+      if (staff.length > 0 && carrito.some((it) => it.tipoItem === "servicio" && !it.staffId)) { setLocalError("Elegí quién realizó cada servicio (columna Profesional)."); return; }
       if (esCheque && !orden.chequeVto) { setLocalError("Indicá la fecha de vencimiento del cheque."); return; }
       const ventaId = uid();
       const cliente = esCtaCte ? (data.clientes || []).find((c) => c.id === orden.clienteId) : null;
@@ -1368,6 +1405,18 @@ function VentasView({ data, update, esAsesora }) {
       const nuevasVentas = [];
       carrito.forEach((it) => {
         const itemDescuento = totalBrutoCarrito ? (it.subtotal / totalBrutoCarrito) * descuentoMontoTotal : 0;
+        // Comisión del profesional (staff): se calcula sobre el total de la línea con el descuento ya aplicado
+        // y queda congelada. OJO: no confundir con comisionPctEstimada/comisionMonto, que son la comisión del medio de pago.
+        const staffObj = staff.find((s) => s.id === it.staffId);
+        const camposStaff = (pctC, totalNeto) =>
+          staffObj
+            ? {
+                staffId: staffObj.id,
+                staffNombre: staffObj.nombre,
+                comisionStaffPct: Number(pctC) || 0,
+                comisionStaffMonto: Math.round(totalNeto * (Number(pctC) || 0)) / 100,
+              }
+            : {};
         const base = {
           ventaId,
           fecha: orden.fecha,
@@ -1400,6 +1449,10 @@ function VentasView({ data, update, esAsesora }) {
             totalBruto: it.subtotal,
             descuentoMonto: itemDescuento,
             total: it.subtotal - itemDescuento,
+            tipoItem: it.tipoItem || "producto",
+            costoUnitario: it.costoUnitario || 0,
+            detalle: it.detalle ? it.detalle.trim() : undefined,
+            ...camposStaff(it.comisionStaffPct, it.subtotal - itemDescuento),
           });
           return;
         }
@@ -1427,6 +1480,9 @@ function VentasView({ data, update, esAsesora }) {
             total: totalBrutoComponente - descuentoComponente,
             comboId: it.productoId,
             comboNombre: it.productoNombre,
+            tipoItem: "producto",
+            costoUnitario: c.costo || 0,
+            ...camposStaff(c.comisionPct, totalBrutoComponente - descuentoComponente),
           });
         });
       });
@@ -1434,6 +1490,7 @@ function VentasView({ data, update, esAsesora }) {
       let productos = data.productos;
       const movStock = [...data.movStock];
       carrito.forEach((it) => {
+        if (it.tipoItem === "servicio" || it.tipoItem === "sillon") return; // servicios y alquileres no llevan stock
         if (!it.esCombo) {
           productos = productos.map((p) => (p.id === it.productoId ? { ...p, stock: Number(p.stock || 0) - it.cantidad } : p));
           movStock.push({ id: uid(), fecha: orden.fecha, productoId: it.productoId, cantidad: -it.cantidad, tipo: "venta" });
@@ -1458,9 +1515,10 @@ function VentasView({ data, update, esAsesora }) {
   }
 
   function eliminar(v) {
-    const productos = data.productos.map((p) =>
-      p.id === v.productoId ? { ...p, stock: Number(p.stock || 0) + v.cantidad } : p
-    );
+    const llevaStock = v.tipoItem !== "servicio" && v.tipoItem !== "sillon";
+    const productos = !llevaStock
+      ? data.productos
+      : data.productos.map((p) => (p.id === v.productoId ? { ...p, stock: Number(p.stock || 0) + v.cantidad } : p));
     update({ ...data, ventas: data.ventas.filter((x) => x.id !== v.id), productos });
   }
 
@@ -1468,11 +1526,11 @@ function VentasView({ data, update, esAsesora }) {
     <div className="flex flex-col gap-5">
       <div>
         <h1 style={{ fontSize: 21, fontWeight: 700, color: C.ink, margin: 0 }}>Ventas</h1>
-        <p style={{ fontSize: 13, color: C.inkSoft, margin: "2px 0 0" }}>Agregá uno o varios productos, y después cerrá la venta.</p>
+        <p style={{ fontSize: 13, color: C.inkSoft, margin: "2px 0 0" }}>Agregá uno o varios productos o servicios, y después cerrá la venta.</p>
       </div>
 
       <Card style={{ padding: 18 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 10 }}>1. Agregar productos</div>
+        <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 10 }}>1. Agregar productos o servicios</div>
         <div className="flex flex-wrap gap-3 items-end" style={{ marginBottom: 14, paddingBottom: 14, borderBottom: `1px solid ${C.line}` }}>
           <Field label="Lista de precio para esta venta">
             <Select
@@ -1491,24 +1549,30 @@ function VentasView({ data, update, esAsesora }) {
           )}
         </div>
         <div className="flex flex-wrap gap-3 items-end">
-          <Field label="Producto">
-            <TextInput
-              list="lista-productos"
-              value={item.productoTexto}
-              onChange={(e) => setItem({ ...item, productoTexto: e.target.value })}
-              placeholder="Escribí para buscar..."
-              style={{ minWidth: 180 }}
+          <div className="flex flex-col gap-1 text-sm" style={{ color: C.inkSoft }}>
+            <span>Producto o servicio</span>
+            <BuscadorItem
+              items={catalogo}
+              valor={item.productoTexto}
+              seleccionado={!!productoItem}
+              campoPrecio={LISTA_CAMPO[orden.lista]}
+              onTexto={(t) => { setSelId(null); setItem({ ...item, productoTexto: t }); }}
+              onElegir={(it) => { setSelId(it.id); setItem({ ...item, productoTexto: it.nombre }); }}
             />
-            <datalist id="lista-productos">
-              {data.productos.map((p) => <option key={p.id} value={p.nombre} />)}
-              {data.productos.filter((p) => p.codigo).map((p) => <option key={p.id + "-cod"} value={p.codigo} />)}
-            </datalist>
-          </Field>
+          </div>
+          {staff.length > 0 && (
+            <Field label="Profesional">
+              <Select value={staffDefault} onChange={(e) => setStaffDefault(e.target.value)} style={{ minWidth: 140 }}>
+                <option value="">Sin asignar</option>
+                {staff.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+              </Select>
+            </Field>
+          )}
           <Field label="Cantidad">
             <TextInput type="number" min="1" value={item.cantidad} onChange={(e) => setItem({ ...item, cantidad: e.target.value })} style={{ width: 80 }} />
           </Field>
           <Field label="Precio unitario">
-            <MoneyField value={item.precioUnitario} onChange={(v) => setItem({ ...item, precioUnitario: v })} style={{ width: 110 }} placeholder="0" disabled={!!productoItem} />
+            <MoneyField value={item.precioUnitario} onChange={(v) => setItem({ ...item, precioUnitario: v })} style={{ width: 110 }} placeholder="0" disabled={!!productoItem && !montoLibre} />
           </Field>
           <Button type="button" onClick={agregarItem} disabled={!productoItem || combosInsuficientes}>
             <Plus size={15} /> Agregar a la venta
@@ -1516,7 +1580,10 @@ function VentasView({ data, update, esAsesora }) {
         </div>
         {productoItem && (
           <div style={{ fontSize: 12, color: C.inkFaint, marginTop: 6 }}>
-            El precio se toma de Stock y no se puede modificar acá — para cambiarlo, hacelo desde Productos y Stock.
+            {montoLibre
+              ? "Este ítem no tiene precio de lista: escribí el monto a cobrar."
+              : "El precio se toma de Productos y Stock y no se puede modificar acá — para cambiarlo, hacelo desde ahí."}
+            {itemSinStock && " No descuenta stock."}
           </div>
         )}
         {combosInsuficientes && (
@@ -1527,9 +1594,10 @@ function VentasView({ data, update, esAsesora }) {
 
         {carrito.length > 0 && (
           <div style={{ marginTop: 16 }}>
-            <Tbl columns={6} style={{ fontSize: 13 }}>
+            <Tbl columns={staff.length > 0 ? 7 : 6} style={{ fontSize: 13 }}>
                 <TblHeadRow style={{ color: C.inkSoft, textAlign: "left" }}>
                   <TblTh style={{ padding: "6px 8px" }}>Producto</TblTh>
+                  {staff.length > 0 && <TblTh style={{ padding: "6px 8px" }}>Profesional</TblTh>}
                   <TblTh style={{ padding: "6px 8px" }}>Cant.</TblTh>
                   <TblTh style={{ padding: "6px 8px" }}>Lista</TblTh>
                   <TblTh style={{ padding: "6px 8px", textAlign: "right" }}>P. Unit.</TblTh>
@@ -1541,7 +1609,29 @@ function VentasView({ data, update, esAsesora }) {
                     <TblCell data-label="Producto" style={{ padding: "6px 8px" }}>
                       {it.productoNombre}
                       {it.esCombo && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· Combo</span>}
+                      {it.tipoItem === "servicio" && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· Servicio</span>}
+                      {it.tipoItem === "sillon" && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· Sillón/Gab</span>}
+                      {it.tipoItem === "sillon" && (
+                        <TextInput
+                          value={it.detalle}
+                          onChange={(e) => cambiarItemCarrito(it.tempId, { detalle: e.target.value })}
+                          placeholder="Detalle (quién alquila, período…)"
+                          style={{ display: "block", marginTop: 4, width: "100%", boxSizing: "border-box", fontSize: 12.5, padding: "4px 8px" }}
+                        />
+                      )}
                     </TblCell>
+                    {staff.length > 0 && (
+                      <TblCell data-label="Profesional" style={{ padding: "6px 8px" }}>
+                        {it.tipoItem === "sillon" ? (
+                          <span style={{ color: C.inkFaint }}>—</span>
+                        ) : (
+                          <Select value={it.staffId || ""} onChange={(e) => cambiarItemCarrito(it.tempId, { staffId: e.target.value })} style={{ padding: "4px 6px", fontSize: 13 }}>
+                            <option value="">Sin asignar</option>
+                            {staff.map((s) => <option key={s.id} value={s.id}>{s.nombre}</option>)}
+                          </Select>
+                        )}
+                      </TblCell>
+                    )}
                     <TblCell data-label="Cant." style={{ padding: "6px 8px" }}>{it.cantidad}</TblCell>
                     <TblCell data-label="Lista" style={{ padding: "6px 8px" }}>{it.listaLabel}</TblCell>
                     <TblCell data-label="P. Unit." style={{ padding: "6px 8px", textAlign: "right" }}>{money(it.precioUnitario)}</TblCell>
@@ -1671,9 +1761,9 @@ function VentasView({ data, update, esAsesora }) {
 
       {verHistorico && (
         <Card style={{ padding: 0, overflow: "hidden" }}>
-          <Tbl columns={13} style={{ fontSize: 13 }}>
+          <Tbl columns={14} style={{ fontSize: 13 }}>
               <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
-                {["Fecha", "Producto", "Cant.", "Lista", "Bruto", "Desc.", "Total", "Punto de venta", "Medio", "Cobro", "Cliente", "Obs.", ""].map((h) => (
+                {["Fecha", "Producto", "Cant.", "Lista", "Bruto", "Desc.", "Total", "Punto de venta", "Medio", "Cobro", "Cliente", "Profesional", "Obs.", ""].map((h) => (
                   <TblTh key={h} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>
                 ))}
               </TblHeadRow>
@@ -1685,6 +1775,7 @@ function VentasView({ data, update, esAsesora }) {
                     {v.comboNombre && (
                       <div style={{ fontSize: 11, color: C.inkFaint }}>parte del combo "{v.comboNombre}"</div>
                     )}
+                    {v.detalle && <div style={{ fontSize: 11, color: C.inkFaint }}>{v.detalle}</div>}
                   </TblCell>
                   <TblCell data-label="Cant." style={{ padding: "8px 12px" }}>{v.cantidad}</TblCell>
                   <TblCell data-label="Lista" style={{ padding: "8px 12px" }}>{v.listaLabel || v.lista}</TblCell>
@@ -1710,6 +1801,10 @@ function VentasView({ data, update, esAsesora }) {
                     )}
                   </TblCell>
                   <TblCell data-label="Cliente" style={{ padding: "8px 12px" }}>{v.clienteNombre || "—"}</TblCell>
+                  <TblCell data-label="Profesional" style={{ padding: "8px 12px" }}>
+                    {v.staffNombre || "—"}
+                    {v.comisionStaffMonto > 0 && <div style={{ fontSize: 11, color: C.inkFaint }}>com. {money(v.comisionStaffMonto)} ({v.comisionStaffPct}%)</div>}
+                  </TblCell>
                   <TblCell data-label="Obs." style={{ padding: "8px 12px", color: C.inkSoft, maxWidth: 160 }}>{v.observaciones}</TblCell>
                   <TblCell data-label="" style={{ padding: "8px 12px" }}>
                     <Trash2
@@ -1956,6 +2051,12 @@ function CamposPrecioProducto({ draft, setDraft, data, ancho100 = false }) {
       <Field label="% comisión por venta (opcional)">
         <TextInput type="number" inputMode="decimal" value={draft.comisionPct ?? ""} onChange={setCampo("comisionPct")} style={w(110)} placeholder="Ej: 10" />
       </Field>
+      <Field label="Solo uso interno">
+        <span className="flex items-center gap-2" style={{ fontSize: 13, color: C.ink }}>
+          <input type="checkbox" checked={!!draft.soloInterno} onChange={(e) => setDraft({ ...draft, soloInterno: e.target.checked })} />
+          No se vende (insumos, tinturas)
+        </span>
+      </Field>
       <div style={{ flexBasis: "100%", fontSize: 12, color: C.inkSoft, lineHeight: 1.45 }}>
         Precio sugerido = costo × (1 + % sobre costo), redondeado hacia arriba a múltiplos de {mult}.
         {listasActivas(data).includes("mayorista") && (hayAj2
@@ -2033,6 +2134,7 @@ function ProductoDetalle({ producto, data, onGuardar, onEliminar, cargaForm, set
     comisionPct: producto.comisionPct ?? "",
     manualL1: !!producto.manualL1,
     manualL2: !!producto.manualL2,
+    soloInterno: !!producto.soloInterno,
     stockMinimo: producto.stockMinimo ?? "",
   });
   const [mostrarCarga, setMostrarCarga] = useState(false);
@@ -2053,6 +2155,7 @@ function ProductoDetalle({ producto, data, onGuardar, onEliminar, cargaForm, set
       comisionPct: numOrEmpty(draft.comisionPct),
       manualL1: !!draft.manualL1,
       manualL2: !!draft.manualL2,
+      soloInterno: !!draft.soloInterno,
       precioMinorista: Number(calc.precioMinorista) || 0,
       precioMayorista: Number(calc.precioMayorista) || 0,
       precioOtro: Number(draft.precioOtro) || 0,
@@ -2150,6 +2253,234 @@ function ProductoDetalle({ producto, data, onGuardar, onEliminar, cargaForm, set
 }
 
 // Lista compacta de una línea por ítem (celular): nombre (+ código) a la izquierda, valor a la derecha.
+// Buscador para elegir qué se vende (producto, combo, servicio o sillón/gabinete). Filtra mientras se
+// escribe (todas las palabras tienen que aparecer en nombre, código, marca o familia, sin importar
+// tildes ni mayúsculas) y muestra el precio de la lista elegida. Flechas + Enter para elegir con teclado.
+function BuscadorItem({ items, valor, seleccionado, campoPrecio, onTexto, onElegir }) {
+  const [abierto, setAbierto] = useState(false);
+  const [activo, setActivo] = useState(0);
+  const palabras = normalizarTexto(valor).split(/\s+/).filter(Boolean);
+  const todos = palabras.length === 0 ? [] : items.filter((it) => {
+    const t = normalizarTexto([it.nombre, it.codigo, it.marca, it.familia].join(" "));
+    return palabras.every((w) => t.includes(w));
+  });
+  const resultados = todos.slice(0, 8);
+  const mostrar = abierto && !seleccionado && palabras.length > 0;
+  const TIPOS = { combo: "Combo", servicio: "Servicio", sillon: "Sillón/Gab" };
+  function elegir(it) { onElegir(it); setAbierto(false); setActivo(0); }
+  return (
+    <div style={{ position: "relative" }}>
+      <TextInput
+        value={valor}
+        placeholder="Escribí nombre, código o marca…"
+        autoComplete="off"
+        onChange={(e) => { onTexto(e.target.value); setAbierto(true); setActivo(0); }}
+        onFocus={() => setAbierto(true)}
+        onBlur={() => setTimeout(() => setAbierto(false), 150)}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); setActivo((a) => Math.min(a + 1, resultados.length - 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setActivo((a) => Math.max(a - 1, 0)); }
+          else if (e.key === "Enter" && mostrar && resultados[activo]) { e.preventDefault(); elegir(resultados[activo]); }
+          else if (e.key === "Escape") setAbierto(false);
+        }}
+        style={{ minWidth: 220 }}
+      />
+      {mostrar && (
+        <div style={{ position: "absolute", top: "100%", left: 0, zIndex: 30, marginTop: 2, width: 340, maxWidth: "90vw", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 8, boxShadow: "0 6px 18px rgba(46,41,59,0.12)", maxHeight: 320, overflowY: "auto" }}>
+          {resultados.length === 0 && <div style={{ padding: "10px 12px", fontSize: 13, color: C.inkFaint }}>Sin resultados.</div>}
+          {resultados.map((it, i) => (
+            <div
+              key={it.id}
+              onMouseDown={(e) => { e.preventDefault(); elegir(it); }}
+              onMouseEnter={() => setActivo(i)}
+              style={{ padding: "8px 12px", cursor: "pointer", background: i === activo ? C.greenSoft : "transparent", borderBottom: `1px solid ${C.line}` }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span style={{ fontWeight: 600, fontSize: 13.5, color: C.ink }}>
+                  {it.nombre}
+                  {TIPOS[it.tipoItem] && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· {TIPOS[it.tipoItem]}</span>}
+                </span>
+                <span style={{ fontSize: 13, color: C.green, fontWeight: 600, whiteSpace: "nowrap" }}>{money(it[campoPrecio] || 0)}</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: C.inkFaint }}>
+                {[it.marca, it.codigo, it.familia].filter(Boolean).join(" · ")}
+                {it.tipoItem === "producto" ? ` · stock ${Number(it.stock || 0)}` : ""}
+              </div>
+            </div>
+          ))}
+          {todos.length > resultados.length && (
+            <div style={{ padding: "8px 12px", fontSize: 12, color: C.inkSoft }}>Hay {todos.length - resultados.length} más: escribí más letras para acotar.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Servicios ("corte", "coloración"…) y Sillón/Gabinete (alquileres). No llevan stock, pero se
+// pueden vender desde Ventas. El servicio lleva un % de comisión para quien lo realiza; el
+// alquiler de sillón/gabinete no genera comisión. La Lista 2 se calcula sola desde la Lista 1
+// (según el % de Configuración) salvo que se tilde "Manual".
+function ServiciosView({ data, update, tipo, palabras }) {
+  const esServicio = tipo === "servicio";
+  const [form, setForm] = useState(null);
+  const [pendienteBorrar, setPendienteBorrar] = useState(null);
+  const labels = data.listaLabels || LISTA_LABEL_DEFAULT;
+  const listas = listasActivas(data);
+  const tieneL2 = listas.includes("mayorista");
+  const lista = (data.servicios || []).filter((sv) => (sv.tipo || "servicio") === tipo);
+  const vista = lista.filter((sv) => palabras.length === 0 || palabras.every((w) => normalizarTexto([sv.nombre, sv.codigo, sv.familia].join(" ")).includes(w)));
+  const calc = form ? calcularPrecios({ ...form, costo: "", markupPct: "" }, data) : null;
+  const aj2 = data.ajusteLista2Pct;
+  const hayAj2 = aj2 !== "" && aj2 != null && !isNaN(Number(aj2));
+  const nombreTipo = esServicio ? "servicio" : "sillón / gabinete";
+
+  function nuevo() {
+    setForm({ nombre: "", codigo: "", familia: data.familias[0] || "", precioMinorista: "", precioMayorista: "", manualL2: false, comisionPct: "" });
+  }
+  function editar(sv) {
+    setForm({ id: sv.id, nombre: sv.nombre, codigo: sv.codigo || "", familia: sv.familia || data.familias[0] || "", precioMinorista: sv.precioMinorista ?? "", precioMayorista: sv.precioMayorista ?? "", manualL2: !!sv.manualL2, comisionPct: sv.comisionPct ?? "" });
+  }
+  function guardar() {
+    if (!form.nombre.trim()) return;
+    const c = calcularPrecios({ ...form, costo: "", markupPct: "" }, data);
+    const com = numOrEmpty(form.comisionPct);
+    const item = {
+      id: form.id || uid(),
+      tipo,
+      nombre: form.nombre.trim(),
+      codigo: (form.codigo || "").trim(),
+      familia: form.familia,
+      precioMinorista: Number(form.precioMinorista) || 0,
+      precioMayorista: Number(c.precioMayorista) || 0,
+      manualL2: !!form.manualL2,
+      ...(esServicio ? { comisionPct: com === "" ? "" : Math.max(0, Math.min(100, com)) } : {}),
+    };
+    const actuales = data.servicios || [];
+    update({ ...data, servicios: form.id ? actuales.map((sv) => (sv.id === form.id ? item : sv)) : [...actuales, item] });
+    setForm(null);
+  }
+  function borrar(id) {
+    update({ ...data, servicios: (data.servicios || []).filter((sv) => sv.id !== id) });
+  }
+
+  return (
+    <>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div style={{ fontSize: 12.5, color: C.inkSoft, maxWidth: 640 }}>
+          {esServicio
+            ? "Los servicios que presta el salón, con su precio de lista y la comisión que se le paga a quien lo realiza. No llevan stock, pero se venden desde Ventas. Si dejás el precio en blanco, el monto se escribe al vender (por ejemplo, depilación o una seña)."
+            : "Alquiler de sillón de corte y de gabinetes (depilación u otros servicios). No llevan stock ni generan comisión; en la venta podés anotar quién lo alquila."}
+        </div>
+        {!form && <Button onClick={nuevo}><Plus size={15} /> {esServicio ? "Nuevo servicio" : "Nuevo sillón / gabinete"}</Button>}
+      </div>
+
+      {form && (
+        <Card style={{ padding: 16 }}>
+          <div style={{ fontWeight: 600, marginBottom: 10 }}>{form.id ? "Editar" : "Nuevo"} {nombreTipo}</div>
+          <div className="flex flex-wrap gap-3 items-end">
+            <Field label="Nombre">
+              <TextInput value={form.nombre} onChange={(e) => setForm({ ...form, nombre: e.target.value })} style={{ minWidth: 200 }} autoFocus />
+            </Field>
+            <Field label="Código (opcional)">
+              <TextInput value={form.codigo} onChange={(e) => setForm({ ...form, codigo: e.target.value })} style={{ width: 110 }} />
+            </Field>
+            <Field label="Familia">
+              <Select value={form.familia} onChange={(e) => setForm({ ...form, familia: e.target.value })} style={{ minWidth: 140 }}>
+                {data.familias.map((f) => <option key={f} value={f}>{f}</option>)}
+              </Select>
+            </Field>
+            <Field label={`Precio ${labels.minorista || LISTA_LABEL_DEFAULT.minorista}`}>
+              <TextInput type="number" inputMode="decimal" value={form.precioMinorista} onChange={(e) => setForm({ ...form, precioMinorista: e.target.value })} style={{ width: 110 }} />
+            </Field>
+            {tieneL2 && (
+              <Field label={`Precio ${labels.mayorista || LISTA_LABEL_DEFAULT.mayorista}`}>
+                <TextInput
+                  type="number"
+                  inputMode="decimal"
+                  value={calc.precioMayorista ?? ""}
+                  onChange={(e) => setForm({ ...form, precioMayorista: e.target.value, manualL2: true })}
+                  style={{ width: 110 }}
+                />
+                <span className="flex items-center gap-1" style={{ fontSize: 11.5, color: C.inkSoft }}>
+                  <input
+                    type="checkbox"
+                    checked={!!form.manualL2}
+                    onChange={(e) => setForm({ ...form, ...(e.target.checked ? { precioMayorista: calc.precioMayorista } : {}), manualL2: e.target.checked })}
+                  />
+                  Manual
+                </span>
+              </Field>
+            )}
+            {esServicio && (
+              <Field label="% comisión para quien lo realiza">
+                <TextInput type="number" inputMode="decimal" value={form.comisionPct} onChange={(e) => setForm({ ...form, comisionPct: e.target.value })} style={{ width: 130 }} placeholder="Ej: 40" />
+              </Field>
+            )}
+          </div>
+          {tieneL2 && (
+            <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 8 }}>
+              {hayAj2
+                ? `La ${labels.mayorista || LISTA_LABEL_DEFAULT.mayorista} se calcula desde la ${labels.minorista || LISTA_LABEL_DEFAULT.minorista} (${Number(aj2) >= 0 ? "+" : "−"}${Math.abs(Number(aj2))}%, redondeada hacia arriba). Tildá "Manual" para poner otro precio.`
+                : "Para que la Lista 2 se calcule sola, definí su % en Configuración."}
+            </div>
+          )}
+          <div className="flex gap-2" style={{ marginTop: 12 }}>
+            <Button onClick={guardar} disabled={!form.nombre.trim()}><Check size={15} /> Guardar</Button>
+            <Button variant="ghost" onClick={() => setForm(null)}>Cancelar</Button>
+          </div>
+        </Card>
+      )}
+
+      {palabras.length > 0 && <div style={{ fontSize: 12.5, color: C.inkSoft }}>{vista.length} de {lista.length}</div>}
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <Tbl columns={4 + listas.length + (esServicio ? 1 : 0)} style={{ fontSize: 13 }}>
+          <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
+            {[esServicio ? "Servicio" : "Sillón / Gabinete", "Código", "Familia", ...listas.map((k) => labels[k] || LISTA_LABEL_DEFAULT[k]), ...(esServicio ? ["Comisión"] : []), ""].map((h, i) => (
+              <TblTh key={i} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>
+            ))}
+          </TblHeadRow>
+          {vista.map((sv) => (
+            <TblRow key={sv.id} style={{ borderTop: `1px solid ${C.line}` }}>
+              <TblCell data-label="Nombre" style={{ padding: "8px 12px", fontWeight: 600 }}>{sv.nombre}</TblCell>
+              <TblCell data-label="Código" style={{ padding: "8px 12px", color: C.inkSoft }}>{sv.codigo || "—"}</TblCell>
+              <TblCell data-label="Familia" style={{ padding: "8px 12px" }}>{sv.familia}</TblCell>
+              {listas.map((k) => (
+                <TblCell key={k} data-label={labels[k] || LISTA_LABEL_DEFAULT[k]} style={{ padding: "8px 12px" }}>{money(sv[LISTA_CAMPO[k]] || 0)}</TblCell>
+              ))}
+              {esServicio && (
+                <TblCell data-label="Comisión" style={{ padding: "8px 12px", color: C.inkSoft }}>{Number(sv.comisionPct) > 0 ? `${sv.comisionPct}%` : "—"}</TblCell>
+              )}
+              <TblCell data-label="" style={{ padding: "8px 12px" }}>
+                <span className="flex items-center gap-3">
+                  <Pencil size={15} style={{ cursor: "pointer", color: C.inkFaint }} onClick={() => editar(sv)} />
+                  <Trash2 size={15} style={{ cursor: "pointer", color: C.inkFaint }} onClick={() => setPendienteBorrar(sv)} />
+                </span>
+              </TblCell>
+            </TblRow>
+          ))}
+          {vista.length === 0 && (
+            <TblRow>
+              <TblCell style={{ gridColumn: "1 / -1", padding: 24, textAlign: "center", color: C.inkFaint }}>
+                {lista.length === 0 ? `Todavía no cargaste ningún ${nombreTipo}.` : "Nada coincide con la búsqueda."}
+              </TblCell>
+            </TblRow>
+          )}
+        </Tbl>
+      </Card>
+
+      {pendienteBorrar && (
+        <ConfirmDialog
+          mensaje={`¿Eliminar "${pendienteBorrar.nombre}"? Las ventas ya registradas no se modifican, pero deja de estar disponible para vender.`}
+          onConfirmar={() => { borrar(pendienteBorrar.id); setPendienteBorrar(null); }}
+          onCancelar={() => setPendienteBorrar(null)}
+        />
+      )}
+    </>
+  );
+}
+
 function ListaCompacta({ filas, cabeceraDerecha, vacio, onAbrir }) {
   return (
     <Card style={{ padding: 0, overflow: "hidden" }}>
@@ -2271,7 +2602,7 @@ function ProductosView({ data, update }) {
   const esMobile = useEsMobile();
   const [detalleId, setDetalleId] = useState(null); // producto/combo abierto en la pantalla de detalle
   const [eliminarPendiente, setEliminarPendiente] = useState(null); // ítem a confirmar antes de borrar desde la tabla
-  const [vista, setVista] = useState("productos"); // "productos" | "combos"
+  const [vista, setVista] = useState("productos"); // "productos" | "combos" | "servicios" | "sillon"
   const [nuevo, setNuevo] = useState(null);
   const [cargaStockId, setCargaStockId] = useState(null);
   const [cargaForm, setCargaForm] = useState({ cantidad: "", motivo: "Compra", fecha: todayStr() });
@@ -2293,7 +2624,7 @@ function ProductosView({ data, update }) {
   const combosVista = combos.filter(coincideBusqueda);
 
   function crearProducto() {
-    setNuevo({ nombre: "", codigo: "", familia: data.familias[0] || "", marca: "", costo: "", markupPct: "", comisionPct: "", manualL1: false, manualL2: false, precioMinorista: 0, precioMayorista: 0, precioOtro: 0, precioCuarto: 0, stock: 0, stockMinimo: "" });
+    setNuevo({ nombre: "", codigo: "", familia: data.familias[0] || "", marca: "", costo: "", markupPct: "", comisionPct: "", manualL1: false, manualL2: false, soloInterno: false, precioMinorista: 0, precioMayorista: 0, precioOtro: 0, precioCuarto: 0, stock: 0, stockMinimo: "" });
   }
   function guardarNuevo() {
     if (!nuevo.nombre.trim()) return;
@@ -2417,13 +2748,19 @@ function ProductosView({ data, update }) {
             <Button variant={vista === "combos" ? "primary" : "ghost"} onClick={() => setVista("combos")} style={{ padding: "6px 14px", fontSize: 13 }}>
               Combos
             </Button>
+            <Button variant={vista === "servicios" ? "primary" : "ghost"} onClick={() => setVista("servicios")} style={{ padding: "6px 14px", fontSize: 13 }}>
+              Servicios
+            </Button>
+            <Button variant={vista === "sillon" ? "primary" : "ghost"} onClick={() => setVista("sillon")} style={{ padding: "6px 14px", fontSize: 13 }}>
+              Sillón/Gab
+            </Button>
           </div>
         </div>
         {vista === "productos" ? (
           <Button onClick={crearProducto}><Plus size={15} /> Nuevo producto</Button>
-        ) : (
+        ) : vista === "combos" ? (
           <Button onClick={crearCombo}><Plus size={15} /> Nuevo combo</Button>
-        )}
+        ) : null}
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -2433,14 +2770,14 @@ function ProductosView({ data, update }) {
             type="search"
             value={busqueda}
             onChange={(e) => setBusqueda(e.target.value)}
-            placeholder={vista === "productos" ? "Buscar por nombre, código, marca o familia…" : "Buscar combo por nombre, código o familia…"}
+            placeholder={vista === "productos" ? "Buscar por nombre, código, marca o familia…" : vista === "combos" ? "Buscar combo por nombre, código o familia…" : "Buscar por nombre, código o familia…"}
             style={{ width: "100%", boxSizing: "border-box", paddingLeft: 32 }}
           />
         </div>
         {palabrasBusqueda.length > 0 && (
           <>
             <span style={{ fontSize: 12.5, color: C.inkSoft }}>
-              {vista === "productos" ? `${productosVista.length} de ${productosNormales.length}` : `${combosVista.length} de ${combos.length}`}
+              {vista === "productos" ? `${productosVista.length} de ${productosNormales.length}` : vista === "combos" ? `${combosVista.length} de ${combos.length}` : ""}
             </span>
             <Button variant="ghost" style={{ padding: "4px 10px", fontSize: 12.5 }} onClick={() => setBusqueda("")}>
               <X size={13} /> Limpiar
@@ -2485,7 +2822,7 @@ function ProductosView({ data, update }) {
               filas={productosVista.map((p) => ({
                 id: p.id,
                 nombre: p.nombre,
-                codigo: [p.marca, p.codigo].filter(Boolean).join(" · "),
+                codigo: [p.marca, p.codigo, p.soloInterno ? "uso interno" : ""].filter(Boolean).join(" · "),
                 valor: p.stock,
                 alerta: p.stockMinimo !== "" && p.stockMinimo != null && Number(p.stock) <= Number(p.stockMinimo),
               }))}
@@ -2512,7 +2849,7 @@ function ProductosView({ data, update }) {
                         <TblCell data-label="Producto" style={{ padding: "8px 12px", fontWeight: 500 }}>{p.nombre}</TblCell>
                         <TblCell data-label="Código" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.codigo || "—"}</TblCell>
                         <TblCell data-label="Familia" style={{ padding: "8px 12px" }}>{p.familia}</TblCell>
-                        <TblCell data-label="Marca" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.marca || "—"}</TblCell>
+                        <TblCell data-label="Marca" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.marca || "—"}{p.soloInterno && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· uso interno</span>}</TblCell>
                         <TblCell data-label="Costo" style={{ padding: "8px 12px", color: C.inkSoft }}>{Number(p.costo) > 0 ? money(p.costo) : "—"}</TblCell>
                         {camposPrecioActivos.map((campo) => (
                           <TblCell key={campo} data-label={labelPorCampo[campo]} style={{ padding: "8px 12px" }}>{money(p[campo])}</TblCell>
@@ -2683,6 +3020,10 @@ function ProductosView({ data, update }) {
           </Card>
           )}
         </>
+      )}
+
+      {(vista === "servicios" || vista === "sillon") && (
+        <ServiciosView key={vista} data={data} update={update} tipo={vista} palabras={palabrasBusqueda} />
       )}
 
       {eliminarPendiente && (
@@ -3444,7 +3785,7 @@ function ImportacionGenerica({ data, update }) {
 }
 
 function ImportarView({ data, update }) {
-  const [modo, setModo] = useState("clasico");
+  const [modo, setModo] = useState("peluqueria");
   const [preview, setPreview] = useState(null);
   const [error, setError] = useState("");
   const fileRef = useRef();
@@ -3626,6 +3967,7 @@ function ImportarView({ data, update }) {
       </div>
 
       <div className="flex gap-2">
+        <Button variant={modo === "peluqueria" ? "primary" : "ghost"} onClick={() => setModo("peluqueria")}>Excel peluquería</Button>
         <Button variant={modo === "clasico" ? "primary" : "ghost"} onClick={() => setModo("clasico")}>Excel clásico</Button>
         <Button variant={modo === "generico" ? "primary" : "ghost"} onClick={() => setModo("generico")}>Ecommerce / WhatsApp</Button>
       </div>
@@ -3669,7 +4011,728 @@ function ImportarView({ data, update }) {
         </>
       )}
 
+      {modo === "peluqueria" && <ImportarPeluqueria data={data} update={update} />}
       {modo === "generico" && <ImportacionGenerica data={data} update={update} />}
+    </div>
+  );
+}
+
+/* ---------- Importar planilla de peluquería ---------- */
+// Estructura esperada (ver "Plantilla_Importacion_Peluquerias.xlsx"): solapas Config, Productos, Servicios,
+// Ingresos, Gabinetes (opcional) y Egresos. Todas son opcionales y se reconocen por el nombre. Los encabezados
+// se leen sin importar mayúsculas ni tildes, siempre en la primera fila de cada solapa. Todo se arma en
+// memoria: recién al confirmar se guarda. Las ventas importadas NO tocan el stock (el stock sale de la
+// columna Stock de Productos).
+const encabezadoNorm = (v) => normalizarTexto(v).replace(/\s+/g, " ").trim();
+const vacioImp = (v) => v === undefined || v === null || String(v).trim() === "" || String(v).trim() === "-";
+const esSiImp = (v) => /^(si|s|x|1|true|verdadero|yes)$/.test(normalizarTexto(v).trim());
+
+function leerFilasHoja(sheet, claves) {
+  if (!sheet || !sheet["!ref"]) return [];
+  const range = XLSX.utils.decode_range(sheet["!ref"]);
+  let hdr = -1;
+  let headers = [];
+  for (let r = range.s.r; r <= Math.min(range.s.r + 7, range.e.r); r++) {
+    const vals = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+      vals.push(cell && cell.v !== undefined ? encabezadoNorm(cell.v) : "");
+    }
+    if (claves.some((k) => vals.some((v) => v === k || v.includes(k)))) { hdr = r; headers = vals; break; }
+  }
+  if (hdr < 0) return [];
+  const filas = [];
+  for (let r = hdr + 1; r <= range.e.r; r++) {
+    const fila = { __z: {} };
+    let hay = false;
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const key = headers[c - range.s.c];
+      if (!key) continue;
+      const cell = sheet[XLSX.utils.encode_cell({ r, c })];
+      if (cell && cell.v !== undefined && cell.v !== "") {
+        hay = true;
+        fila[key] = cell.v;
+        if (cell.z) fila.__z[key] = cell.z;
+      }
+    }
+    if (hay) filas.push(fila);
+  }
+  return filas;
+}
+// Busca una columna por nombre exacto (en el orden dado) y, si no, por texto parcial.
+function claveCol(fila, exactos, parciales = []) {
+  for (const n of exactos) if (fila[n] !== undefined) return n;
+  for (const k of Object.keys(fila)) {
+    if (k.startsWith("__")) continue;
+    if (parciales.some((n) => k.includes(n))) return k;
+  }
+  return null;
+}
+function valorCol(fila, exactos, parciales = []) {
+  const k = claveCol(fila, exactos, parciales);
+  return k ? fila[k] : undefined;
+}
+function aNumero(v) {
+  if (v === undefined || v === null || v === "") return "";
+  if (typeof v === "number") return isNaN(v) ? "" : v;
+  let t = String(v).replace(/[$\s]/g, "");
+  if (!t || t === "-") return "";
+  if (t.includes(",") && t.includes(".")) t = t.replace(/\./g, "").replace(",", ".");
+  else if (t.includes(",")) t = t.replace(",", ".");
+  const n = Number(t);
+  return isNaN(n) ? "" : n;
+}
+// Porcentaje en "puntos" (80 = 80%). Si la celda de Excel está formateada como % (guarda 0,8), se multiplica por 100.
+function aPorcentaje(fila, exactos, parciales = []) {
+  const k = claveCol(fila, exactos, parciales);
+  if (!k) return "";
+  const v = fila[k];
+  const n = aNumero(typeof v === "string" ? v.replace("%", "") : v);
+  if (n === "") return "";
+  const esPctExcel = typeof v === "number" && /%/.test(String((fila.__z || {})[k] || ""));
+  return Math.round((esPctExcel ? n * 100 : n) * 100) / 100;
+}
+
+function armarImportacionPeluqueria(wb, data) {
+  const avisos = [];
+  const norm = encabezadoNorm;
+  const hoja = (...regs) => {
+    const n = wb.SheetNames.find((nm) => regs.some((rg) => rg.test(norm(nm))));
+    return n ? wb.Sheets[n] : null;
+  };
+  const txt = (v) => (vacioImp(v) ? "" : String(v).trim());
+  // El medio "Debe" (o "Cuenta Corriente") es la cuenta corriente de clientes: esas filas NO se importan,
+  // porque cada una necesita su cliente. Quedan listadas en los avisos para cargarlas a mano después.
+  const esCtaCte = (m) => ["debe", "cuenta corriente", "cuenta corriente clientes", "cta cte", "cta. cte.", "ctacte"].includes(norm(m));
+  const debeVentas = [];
+  const debeGastos = [];
+  const union = (actual, nuevos) => {
+    const out = [...(actual || [])];
+    nuevos.forEach((n) => { if (n && !out.some((x) => norm(x) === norm(n))) out.push(n); });
+    return out;
+  };
+  const nuevo = {
+    ...data,
+    staff: [...(data.staff || [])],
+    productos: [...(data.productos || [])],
+    servicios: [...(data.servicios || [])],
+    ventas: [...(data.ventas || [])],
+    gastos: [...(data.gastos || [])],
+  };
+  const res = { config: false, staff: 0, productos: 0, servicios: 0, ventas: 0, gastos: 0 };
+  let leyoAlgo = false;
+
+  // ---- Config: listas en columnas (Staff, Medios de pago, Rubros, Tipo de rubro, Familias, Puntos de venta)
+  const sCfg = hoja(/^config/);
+  if (sCfg) {
+    const filas = leerFilasHoja(sCfg, ["staff", "medios", "rubros", "familias", "puntos"]);
+    if (filas.length) {
+      leyoAlgo = true;
+      res.config = true;
+      const lista = (exactos) => filas.map((f) => txt(valorCol(f, exactos))).filter(Boolean);
+      lista(["staff", "profesionales"]).forEach((n) => {
+        if (nuevo.staff.some((s) => norm(s.nombre) === norm(n))) return;
+        if (nuevo.staff.length >= 6) { avisos.push(`Staff: "${n}" no se cargó (el máximo es 6 personas).`); return; }
+        nuevo.staff.push({ id: uid(), nombre: n });
+        res.staff++;
+      });
+      nuevo.medios = union(data.medios, lista(["medios de pago", "medios"]).filter((m) => !esCtaCte(m)));
+      nuevo.familias = union(data.familias, lista(["familias", "familia"]));
+      nuevo.puntosVenta = union(data.puntosVenta, lista(["puntos de venta", "punto de venta"]));
+      const rubroTipo = { ...(data.rubroTipo || {}) };
+      const rubrosNuevos = [];
+      filas.forEach((f) => {
+        const r = txt(valorCol(f, ["rubros", "rubro", "rubros de gasto"]));
+        if (!r) return;
+        rubrosNuevos.push(r);
+        const t = txt(valorCol(f, ["tipo de rubro", "tipo"]));
+        if (t) rubroTipo[r] = normalizarTexto(t).startsWith("f") ? "fijo" : "variable";
+      });
+      nuevo.rubros = union(data.rubros, rubrosNuevos);
+      nuevo.rubroTipo = rubroTipo;
+    }
+  }
+
+  // ---- Productos (incluye los de uso interno). Precio cargado = precio de lista, queda "Manual".
+  // Sin precio pero con costo y % sobre costo = la app lo calcula (redondeo hacia arriba).
+  const sProd = hoja(/^productos/, /^stock y ps/, /^stock$/);
+  if (sProd) {
+    const filas = leerFilasHoja(sProd, ["nombre", "descripcion", "producto"]);
+    if (filas.length) {
+      leyoAlgo = true;
+      const marcas = new Map();
+      nuevo.productos.forEach((p) => { if (p.marca) marcas.set(norm(p.marca), p.marca); });
+      const idx = new Map(nuevo.productos.map((p, i) => [norm(p.nombre), i]));
+      const vistos = new Set();
+      let sinPrecio = 0, repetidos = 0;
+      const famNuevas = [];
+      filas.forEach((f) => {
+        let nombre = txt(valorCol(f, ["nombre", "nombre producto", "producto", "descripcion"], ["nombre"]));
+        if (!nombre) return;
+        const pres = txt(valorCol(f, ["presentacion"], ["presentacion"]));
+        if (pres && !norm(nombre).includes(norm(pres))) nombre = `${nombre} ${pres}`;
+        let marca = txt(valorCol(f, ["marca"], ["marca"]));
+        if (marca) { const k = norm(marca); if (!marcas.has(k)) marcas.set(k, marca); marca = marcas.get(k); }
+        const familia = txt(valorCol(f, ["familia"])) || "General";
+        famNuevas.push(familia);
+        const costo = aNumero(valorCol(f, ["costo"], ["costo"]));
+        const markup = aPorcentaje(f, ["% sobre costo", "% aumento", "markup"], ["sobre costo", "aumento"]);
+        const p1 = aNumero(valorCol(f, ["precio lista 1", "lista 1", "precio de venta", "precio", "minorista"], ["lista 1", "minorista", "precio de venta"]));
+        const p2 = aNumero(valorCol(f, ["precio lista 2", "lista 2", "mayorista"], ["lista 2", "mayorista"]));
+        const manualL1 = p1 !== "" && p1 > 0;
+        const manualL2 = p2 !== "" && p2 > 0;
+        const prod = {
+          nombre,
+          codigo: txt(valorCol(f, ["codigo", "sku"], ["codigo", "sku"])),
+          familia,
+          marca,
+          costo,
+          markupPct: markup,
+          comisionPct: aPorcentaje(f, ["% comision", "comision"], ["comision"]),
+          soloInterno: esSiImp(valorCol(f, ["solo uso interno", "uso interno", "solo interno"], ["uso interno"])),
+          precioMinorista: manualL1 ? p1 : 0,
+          precioMayorista: manualL2 ? p2 : 0,
+          precioOtro: 0,
+          precioCuarto: 0,
+          manualL1,
+          manualL2,
+          stock: aNumero(valorCol(f, ["stock", "stock hoy", "stock actual"], ["stock hoy"])) || 0,
+          stockMinimo: aNumero(valorCol(f, ["stock minimo"], ["stock minimo"])),
+        };
+        if (!manualL1 && !(costo > 0 && markup !== "")) sinPrecio++;
+        const k = norm(nombre);
+        if (vistos.has(k)) repetidos++;
+        vistos.add(k);
+        if (idx.has(k)) {
+          const i = idx.get(k);
+          nuevo.productos[i] = { ...nuevo.productos[i], ...prod, id: nuevo.productos[i].id };
+        } else {
+          idx.set(k, nuevo.productos.length);
+          nuevo.productos.push({ id: uid(), ...prod });
+        }
+        res.productos++;
+      });
+      nuevo.familias = union(nuevo.familias || data.familias, famNuevas);
+      if (sinPrecio) avisos.push(`${sinPrecio} producto${sinPrecio === 1 ? "" : "s"} quedaron sin precio (la planilla no trae precio, ni costo con % sobre costo).`);
+      if (repetidos) avisos.push(repetidos === 1 ? "1 producto aparecía repetido en la planilla; quedó el último." : `${repetidos} productos aparecían repetidos en la planilla; quedó el último.`);
+    }
+  }
+
+  // ---- Servicios y Sillón/Gab. Precio en blanco = monto libre (se escribe al vender).
+  const sServ = hoja(/^servicios/);
+  if (sServ) {
+    const filas = leerFilasHoja(sServ, ["nombre", "servicio"]);
+    if (filas.length) {
+      leyoAlgo = true;
+      const idx = new Map(nuevo.servicios.map((sv, i) => [(sv.tipo || "servicio") + "|" + norm(sv.nombre), i]));
+      const famNuevas = [];
+      filas.forEach((f) => {
+        const nombre = txt(valorCol(f, ["nombre", "servicio", "detalle"], ["nombre"]));
+        if (!nombre) return;
+        const tipo = /sillon|gabinete|alquiler/.test(normalizarTexto(txt(valorCol(f, ["tipo"])))) ? "sillon" : "servicio";
+        const familia = txt(valorCol(f, ["familia"])) || "General";
+        famNuevas.push(familia);
+        const p1 = aNumero(valorCol(f, ["precio lista 1", "lista 1", "precio", "precio de lista"], ["lista 1"]));
+        const p2 = aNumero(valorCol(f, ["precio lista 2", "lista 2"], ["lista 2"]));
+        const k = tipo + "|" + norm(nombre);
+        const item = {
+          id: idx.has(k) ? nuevo.servicios[idx.get(k)].id : uid(),
+          tipo,
+          nombre,
+          codigo: txt(valorCol(f, ["codigo", "sku"], ["codigo"])),
+          familia,
+          precioMinorista: p1 === "" ? 0 : p1,
+          precioMayorista: p2 === "" ? 0 : p2,
+          manualL2: p2 !== "" && p2 > 0,
+          ...(tipo === "servicio" ? { comisionPct: aPorcentaje(f, ["% comision", "comision"], ["comision"]) } : {}),
+        };
+        if (idx.has(k)) nuevo.servicios[idx.get(k)] = item;
+        else { idx.set(k, nuevo.servicios.length); nuevo.servicios.push(item); }
+        res.servicios++;
+      });
+      nuevo.familias = union(nuevo.familias || data.familias, famNuevas);
+    }
+  }
+
+  // ---- Búsquedas para vincular ventas con productos/servicios/staff
+  const prodPorNombre = new Map();
+  nuevo.productos.forEach((p) => { if (!esCombo(p)) prodPorNombre.set(norm(p.nombre), p); });
+  const servPorNombre = new Map();
+  nuevo.servicios.forEach((sv) => servPorNombre.set(norm(sv.nombre), sv));
+  const staffPorNombre = new Map(nuevo.staff.map((st) => [norm(st.nombre), st]));
+  const sinStaff = new Map();
+  const servNoEnc = new Set();
+  const prodNoEnc = new Set();
+  const nuevasVentas = [];
+  const mediosVentas = [];
+  const puntosVentas = [];
+  const agregarLinea = (o) => {
+    const cantidad = o.cantidad > 0 ? o.cantidad : 1;
+    const staffObj = o.staff ? staffPorNombre.get(norm(o.staff)) : null;
+    if (o.staff && !staffObj) sinStaff.set(o.staff, (sinStaff.get(o.staff) || 0) + 1);
+    // Comisión del profesional: % actual del servicio/producto sobre lo cobrado, congelada al importar.
+    const pct = staffObj && o.tipoItem !== "sillon" ? Number(o.item?.comisionPct) || 0 : 0;
+    if (o.medio) mediosVentas.push(o.medio);
+    if (o.punto) puntosVentas.push(o.punto);
+    nuevasVentas.push({
+      id: uid(),
+      fecha: o.fecha,
+      productoId: o.item ? o.item.id : "",
+      productoNombre: o.nombre,
+      familia: o.item?.familia || "General",
+      cantidad,
+      puntoVenta: o.punto || "Importado",
+      lista: "importado",
+      listaLabel: "Importado",
+      precioUnitario: o.monto / cantidad,
+      totalBruto: o.monto,
+      descuentoMonto: 0,
+      total: o.monto,
+      medioPago: o.medio || "",
+      tipoItem: o.tipoItem,
+      ...(staffObj ? { staffId: staffObj.id, staffNombre: staffObj.nombre, comisionStaffPct: pct, comisionStaffMonto: Math.round(o.monto * pct) / 100 } : {}),
+      ...(o.detalle ? { detalle: o.detalle } : {}),
+    });
+  };
+  const fechaValida = (v) => {
+    if (vacioImp(v)) return null;
+    const f = excelDateToStr(v);
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(f)) ? f : null;
+  };
+
+  // ---- Ingresos: cada fila es un servicio y/o un producto (columnas Servicio y Producto)
+  const sIng = hoja(/^ingresos/);
+  if (sIng) {
+    const filas = leerFilasHoja(sIng, ["fecha"]);
+    let sinDetalle = 0, omitidas = 0, fechaMala = 0;
+    filas.forEach((f) => {
+      const fecha = fechaValida(valorCol(f, ["fecha"], ["fecha"]));
+      if (!fecha) { fechaMala++; return; }
+      const servicio = txt(valorCol(f, ["servicio"]));
+      const producto = txt(valorCol(f, ["producto"]));
+      const staff = txt(valorCol(f, ["profesional", "realizado por"], ["realizado por"]));
+      const montoServ = aNumero(valorCol(f, ["monto servicio"], ["monto serv"])) || 0;
+      const montoProd = aNumero(valorCol(f, ["monto producto"], ["monto prod"])) || 0;
+      const total = aNumero(valorCol(f, ["total"])) || 0;
+      const cant = aNumero(valorCol(f, ["cantidad", "unidades"])) || 1;
+      const medio = txt(valorCol(f, ["medio de pago", "medio"], ["medio"]));
+      const punto = txt(valorCol(f, ["punto de venta"]));
+      const obs = txt(valorCol(f, ["observaciones", "observacion", "detalle"], ["observ"]));
+      const mS = montoServ > 0 ? montoServ : (servicio && !producto && total > 0 ? total : 0);
+      const mP = montoProd > 0 ? montoProd : (producto && !servicio && total > 0 ? total : 0);
+      if (esCtaCte(medio)) {
+        const montoFila = mS + mP || total;
+        if (montoFila > 0) debeVentas.push({ fecha, nombre: servicio || producto || "Sin detalle", monto: montoFila });
+        return;
+      }
+      let creo = false;
+      if (servicio && mS > 0) {
+        const it = servPorNombre.get(norm(servicio));
+        if (!it) servNoEnc.add(servicio);
+        agregarLinea({ fecha, nombre: servicio, item: it, tipoItem: it?.tipo === "sillon" ? "sillon" : "servicio", cantidad: cant, monto: mS, medio, punto, staff, detalle: obs });
+        creo = true;
+      }
+      if (producto && mP > 0) {
+        const it = prodPorNombre.get(norm(producto));
+        if (!it) prodNoEnc.add(producto);
+        agregarLinea({ fecha, nombre: producto, item: it, tipoItem: "producto", cantidad: servicio ? 1 : cant, monto: mP, medio, punto, staff, detalle: creo ? "" : obs });
+        creo = true;
+      }
+      if (!creo) {
+        if (!servicio && !producto && total > 0) {
+          agregarLinea({ fecha, nombre: "Sin detalle", item: null, tipoItem: "producto", cantidad: 1, monto: total, medio, punto, staff: "", detalle: obs });
+          sinDetalle++;
+        } else omitidas++;
+      }
+    });
+    if (sinDetalle) avisos.push(sinDetalle === 1 ? `1 ingreso no tenía servicio ni producto; se cargó como "Sin detalle" (revisalo en Ventas).` : `${sinDetalle} ingresos no tenían servicio ni producto; se cargaron como "Sin detalle" (revisalos en Ventas).`);
+    if (omitidas) avisos.push(omitidas === 1 ? "1 fila de Ingresos con monto 0 no se importó." : `${omitidas} filas de Ingresos con monto 0 no se importaron.`);
+    if (fechaMala) avisos.push(fechaMala === 1 ? "1 fila de Ingresos sin fecha válida no se importó." : `${fechaMala} filas de Ingresos sin fecha válida no se importaron.`);
+  }
+
+  // ---- Gabinetes (opcional): alquiler de sillón/gabinete. No genera comisión. Las filas "Productos Aín" se ignoran.
+  const sGab = hoja(/^(gabinete|alquiler|sillon)/);
+  if (sGab) {
+    const filas = leerFilasHoja(sGab, ["fecha"]);
+    let ain = 0;
+    filas.forEach((f) => {
+      const fecha = fechaValida(valorCol(f, ["fecha"], ["fecha"]));
+      const detalle = txt(valorCol(f, ["detalle", "item", "concepto", "servicio"], ["detalle"]));
+      const monto = aNumero(valorCol(f, ["monto", "importe"], ["monto"])) || 0;
+      if (!fecha || !detalle || monto <= 0) return;
+      if (norm(detalle).startsWith("productos ain")) { ain++; return; }
+      const quien = txt(valorCol(f, ["profesional", "quien alquila", "alquila"], ["profesional", "alquila"]));
+      const obs = txt(valorCol(f, ["observaciones", "observacion"], ["observ"]));
+      const medio = txt(valorCol(f, ["medio de pago", "medio"], ["medio"]));
+      if (esCtaCte(medio)) { debeVentas.push({ fecha, nombre: detalle, monto }); return; }
+      const it = servPorNombre.get(norm(detalle));
+      if (!it) servNoEnc.add(detalle);
+      agregarLinea({
+        fecha, nombre: detalle, item: it, tipoItem: "sillon", cantidad: 1, monto, medio, punto: "", staff: "",
+        detalle: [quien ? `Alquila: ${quien}` : "", obs].filter(Boolean).join(" · "),
+      });
+    });
+    if (ain) avisos.push(ain === 1 ? `1 fila de "Productos Aín" en Gabinetes se ignoró, como pediste.` : `${ain} filas de "Productos Aín" en Gabinetes se ignoraron, como pediste.`);
+  }
+
+  if (nuevasVentas.length) {
+    leyoAlgo = true;
+    res.ventas = nuevasVentas.length;
+    nuevo.ventas = [...nuevo.ventas, ...nuevasVentas];
+    nuevo.medios = union(nuevo.medios || data.medios, mediosVentas);
+    nuevo.puntosVenta = union(nuevo.puntosVenta || data.puntosVenta, puntosVentas);
+    nuevo.familias = union(nuevo.familias || data.familias, nuevasVentas.map((v) => v.familia));
+  }
+
+  // ---- Egresos
+  const sEgr = hoja(/^egresos/, /^gastos/);
+  if (sEgr) {
+    const filas = leerFilasHoja(sEgr, ["fecha"]);
+    const nuevos = [];
+    const rubrosEg = [];
+    const mediosEg = [];
+    let sinFecha = 0;
+    filas.forEach((f) => {
+      const fecha = fechaValida(valorCol(f, ["fecha"], ["fecha"]));
+      const monto = aNumero(valorCol(f, ["monto", "importe"], ["monto"])) || 0;
+      if (!fecha || monto <= 0) { if (monto > 0) sinFecha++; return; }
+      const rubro = txt(valorCol(f, ["rubro", "categoria de gasto", "categoria"], ["rubro", "categoria"])) || "Otros";
+      const medio = txt(valorCol(f, ["medio de pago", "medio"], ["medio"]));
+      const detalleEg = txt(valorCol(f, ["detalle egreso", "detalle"], ["detalle"]));
+      if (esCtaCte(medio)) { debeGastos.push({ fecha, nombre: detalleEg ? `${rubro} – ${detalleEg}` : rubro, monto }); return; }
+      rubrosEg.push(rubro);
+      if (medio) mediosEg.push(medio);
+      nuevos.push({ id: uid(), fecha, rubro, detalle: detalleEg, monto, medioPago: medio });
+    });
+    if (nuevos.length) {
+      leyoAlgo = true;
+      res.gastos = nuevos.length;
+      nuevo.gastos = [...nuevo.gastos, ...nuevos];
+      nuevo.rubros = union(nuevo.rubros || data.rubros, rubrosEg);
+      nuevo.medios = union(nuevo.medios || data.medios, mediosEg);
+    }
+    if (sinFecha) avisos.push(sinFecha === 1 ? "1 fila de Egresos sin fecha válida no se importó." : `${sinFecha} filas de Egresos sin fecha válida no se importaron.`);
+  }
+
+  if (sinStaff.size) {
+    const det = [...sinStaff.entries()].map(([n, c]) => `"${n}" (${c})`).join(", ");
+    avisos.push(`Profesionales que no coinciden con el Staff (quedaron sin asignar y sin comisión): ${det}.`);
+  }
+  if (servNoEnc.size) avisos.push(`Servicios o alquileres que no están en la solapa Servicios (se cargaron igual, sin comisión): ${[...servNoEnc].slice(0, 8).join(", ")}${servNoEnc.size > 8 ? "…" : ""}.`);
+  if (prodNoEnc.size) avisos.push(`${prodNoEnc.size} producto${prodNoEnc.size === 1 ? "" : "s"} vendidos no coinciden con ningún nombre de Productos (se cargaron igual, sin vínculo con el stock): ${[...prodNoEnc].slice(0, 6).join(", ")}${prodNoEnc.size > 6 ? "…" : ""}.`);
+  if (res.ventas) avisos.push("Las ventas importadas no modifican el stock: el stock sale de la columna Stock de Productos.");
+  // Pendientes de carga manual (medio "Debe" = cuenta corriente de clientes). Van primero para que se vean.
+  const detalleDebe = (arr) => {
+    const total = arr.reduce((a, d) => a + (Number(d.monto) || 0), 0);
+    const lista = arr.slice(0, 15).map((d) => `${d.fecha} ${d.nombre} $${Number(d.monto).toLocaleString("es-AR")}`).join("; ");
+    return `Total $${total.toLocaleString("es-AR")}. Detalle: ${lista}${arr.length > 15 ? `; y ${arr.length - 15} más` : ""}.`;
+  };
+  if (debeGastos.length) {
+    avisos.unshift(`${debeGastos.length} egreso${debeGastos.length === 1 ? " con medio \"Debe\" no se importó: cargalo" : "s con medio \"Debe\" no se importaron: cargalos"} a mano más adelante. ${detalleDebe(debeGastos)}`);
+  }
+  if (debeVentas.length) {
+    avisos.unshift(`${debeVentas.length} venta${debeVentas.length === 1 ? " con medio \"Debe\" (Cuenta Corriente de clientes) NO se importó: cargala" : "s con medio \"Debe\" (Cuenta Corriente de clientes) NO se importaron: cargalas"} a mano más adelante, después de crear al cliente en Clientes. ${detalleDebe(debeVentas)}`);
+  }
+
+  return { dataNueva: recalcularProductos(nuevo), resumen: res, avisos, vacio: !leyoAlgo };
+}
+
+function ImportarPeluqueria({ data, update }) {
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  const fileRef = useRef();
+
+  function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const wb = XLSX.read(evt.target.result, { type: "array", cellDates: true });
+        const r = armarImportacionPeluqueria(wb, data);
+        if (r.vacio) {
+          setError("No encontré datos reconocibles. Revisá que las solapas se llamen Config, Productos, Servicios, Ingresos, Gabinetes y/o Egresos, con los encabezados en la primera fila.");
+          setPreview(null);
+          return;
+        }
+        setPreview(r);
+      } catch (err) {
+        setError("No pude leer el archivo. Verificá que sea un .xlsx válido.");
+        setPreview(null);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+  function confirmar() {
+    if (!preview) return;
+    update(preview.dataNueva);
+    setPreview(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+  const r = preview?.resumen;
+  return (
+    <>
+      <p style={{ fontSize: 13, color: C.inkSoft, margin: 0, maxWidth: 620 }}>
+        Subí la planilla con las solapas <b>Config</b>, <b>Productos</b>, <b>Servicios</b>, <b>Ingresos</b>, <b>Gabinetes</b> (opcional) y <b>Egresos</b>.
+        Todas son opcionales: se carga lo que haya. Si importás dos veces el mismo archivo, las ventas y los gastos se duplican.
+      </p>
+      <Card style={{ padding: 24, textAlign: "center" }}>
+        <Upload size={28} style={{ color: C.green, margin: "0 auto 10px" }} />
+        <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 13 }} />
+        {error && <div style={{ color: C.rust, fontSize: 13, marginTop: 10 }}>{error}</div>}
+      </Card>
+      {preview && (
+        <Card style={{ padding: 18 }}>
+          <div style={{ fontWeight: 600, marginBottom: 10 }}>Se encontró:</div>
+          <ul style={{ fontSize: 14, color: C.ink, lineHeight: 1.9, paddingLeft: 18 }}>
+            {r.config && <li>Configuración: {r.staff} persona{r.staff === 1 ? "" : "s"} nueva{r.staff === 1 ? "" : "s"} en el Staff, más medios de pago, rubros, familias y puntos de venta</li>}
+            {r.productos > 0 && <li>{r.productos} productos (marca, costo, % sobre costo, stock)</li>}
+            {r.servicios > 0 && <li>{r.servicios} servicios y alquileres de sillón/gabinete</li>}
+            {r.ventas > 0 && <li>{r.ventas} ventas históricas (con profesional y comisión congelada)</li>}
+            {r.gastos > 0 && <li>{r.gastos} gastos históricos</li>}
+          </ul>
+          {preview.avisos.length > 0 && (
+            <div style={{ fontSize: 12.5, color: C.inkSoft, margin: "4px 0 14px", lineHeight: 1.6 }}>
+              <div style={{ fontWeight: 600, color: C.ink, marginBottom: 4 }}>A tener en cuenta:</div>
+              <ul style={{ paddingLeft: 18, margin: 0 }}>
+                {preview.avisos.map((a, i) => <li key={i}>{a}</li>)}
+              </ul>
+            </div>
+          )}
+          <div style={{ fontSize: 12.5, color: C.inkSoft, marginBottom: 14 }}>
+            Los productos y servicios que ya existan con el mismo nombre se actualizan, no se duplican.
+          </div>
+          <div className="flex gap-2">
+            <Button onClick={confirmar}><Check size={15} /> Confirmar importación</Button>
+            <Button variant="ghost" onClick={() => setPreview(null)}>Cancelar</Button>
+          </div>
+        </Card>
+      )}
+    </>
+  );
+}
+
+/* ---------- Staff: liquidación de comisiones ---------- */
+// Solo consulta. La comisión de cada línea de venta (profesional, % y monto) quedó congelada al vender o al
+// importar, así que acá solo se suma por persona entre dos fechas, por FECHA DE VENTA. Cuando se paga, se
+// carga como gasto (por ejemplo, rubro Honorarios). calcularLiquidacionStaff es una función pura, separada
+// de la pantalla, para poder ampliarla más adelante a una liquidación de sueldos más completa.
+function filaStaffVacia(id, nombre) {
+  return {
+    id,
+    nombre,
+    servicios: { cant: 0, ventas: 0, comision: 0 },
+    productos: { cant: 0, ventas: 0, comision: 0 },
+    totalVentas: 0,
+    comision: 0,
+    detalle: [],
+  };
+}
+function calcularLiquidacionStaff(data, desde, hasta) {
+  const mapa = new Map();
+  (data.staff || []).forEach((st) => mapa.set(st.id, filaStaffVacia(st.id, st.nombre)));
+  const sinAsignar = { lineas: 0, total: 0 };
+  (data.ventas || []).forEach((v) => {
+    if (!v.fecha || v.fecha < desde || v.fecha > hasta) return;
+    if (v.tipoItem === "sillon") return; // los alquileres no generan comisión
+    const total = Number(v.total) || 0;
+    if (!v.staffId) { sinAsignar.lineas++; sinAsignar.total += total; return; }
+    let f = mapa.get(v.staffId);
+    if (!f) { f = filaStaffVacia(v.staffId, v.staffNombre || "(ya no está en el Staff)"); mapa.set(v.staffId, f); }
+    const com = Number(v.comisionStaffMonto) || 0;
+    const esServ = v.tipoItem === "servicio";
+    const bloque = esServ ? f.servicios : f.productos;
+    bloque.cant += Number(v.cantidad) || 0;
+    bloque.ventas += total;
+    bloque.comision += com;
+    f.totalVentas += total;
+    f.comision += com;
+    f.detalle.push({
+      fecha: v.fecha,
+      item: v.productoNombre,
+      tipo: esServ ? "Servicio" : "Producto",
+      cantidad: Number(v.cantidad) || 0,
+      total,
+      pct: Number(v.comisionStaffPct) || 0,
+      comision: com,
+    });
+  });
+  const filas = [...mapa.values()];
+  filas.forEach((f) => f.detalle.sort((a, b) => (a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : 0)));
+  return { filas, sinAsignar };
+}
+function rangoMesStaff(offset) {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + offset);
+  const y = d.getFullYear();
+  const m = d.getMonth();
+  const mm = String(m + 1).padStart(2, "0");
+  const ultimo = new Date(y, m + 1, 0).getDate();
+  return { desde: `${y}-${mm}-01`, hasta: `${y}-${mm}-${String(ultimo).padStart(2, "0")}` };
+}
+
+function StaffView({ data }) {
+  const [rango, setRango] = useState(rangoMesStaff(0));
+  const [orden, setOrden] = useState("comision");
+  const [sel, setSel] = useState(null);
+  const { filas, sinAsignar } = useMemo(() => calcularLiquidacionStaff(data, rango.desde, rango.hasta), [data, rango]);
+  const activa = (f) => f.detalle.length > 0;
+  const clave = { comision: (f) => f.comision, ventas: (f) => f.totalVentas, servicios: (f) => f.servicios.cant };
+  const ordenadas = [...filas].sort(
+    (a, b) => (activa(b) ? 1 : 0) - (activa(a) ? 1 : 0) || clave[orden](b) - clave[orden](a) || a.nombre.localeCompare(b.nombre)
+  );
+  const totalComision = filas.reduce((a, f) => a + f.comision, 0);
+  const totalVentas = filas.reduce((a, f) => a + f.totalVentas, 0);
+  const lider = ordenadas.find(activa);
+  const selFila = sel ? filas.find((f) => f.id === sel) : null;
+  const rangoValido = rango.desde && rango.hasta && rango.desde <= rango.hasta;
+
+  function descargar() {
+    const wb = XLSX.utils.book_new();
+    const cols = ["#", "Profesional", "Servicios (cant.)", "Ventas por servicios", "Comisión servicios", "Productos (unid.)", "Ventas por productos", "Comisión productos", "Total ventas", "Total a pagar"];
+    const resumen = [
+      [`Liquidación de comisiones — ${data.nombreNegocio || ""}`, `${rango.desde} a ${rango.hasta}`],
+      [],
+      cols,
+      ...ordenadas.map((f, i) => [activa(f) ? i + 1 : "", f.nombre, f.servicios.cant, f.servicios.ventas, f.servicios.comision, f.productos.cant, f.productos.ventas, f.productos.comision, f.totalVentas, f.comision]),
+      [],
+      ["", "Total", "", "", "", "", "", "", totalVentas, totalComision],
+      ...(sinAsignar.lineas ? [[], ["", `Ventas sin profesional asignado (${sinAsignar.lineas} líneas, sin comisión)`, "", "", "", "", "", "", sinAsignar.total, ""]] : []),
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumen), "Resumen");
+    const detalle = [["Profesional", "Fecha", "Ítem", "Tipo", "Cantidad", "Total vendido", "% comisión", "Comisión"]];
+    ordenadas.forEach((f) => f.detalle.forEach((d) => detalle.push([f.nombre, d.fecha, d.item, d.tipo, d.cantidad, d.total, d.pct, d.comision])));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(detalle), "Detalle");
+    XLSX.writeFile(wb, `liquidacion_staff_${rango.desde}_a_${rango.hasta}.xlsx`);
+  }
+
+  const sinStaffCargado = (data.staff || []).length === 0 && filas.length === 0;
+  return (
+    <div className="flex flex-col gap-5">
+      <div>
+        <h1 style={{ fontSize: 21, fontWeight: 700, color: C.ink, margin: 0 }}>Staff</h1>
+        <p style={{ fontSize: 13, color: C.inkSoft, margin: "2px 0 0", maxWidth: 680 }}>
+          Liquidación de comisiones por persona entre dos fechas, según la fecha de cada venta. Es de consulta: cuando pagues, cargalo como gasto (por ejemplo, en el rubro Honorarios).
+        </p>
+      </div>
+
+      <Card style={{ padding: 16 }}>
+        <div className="flex flex-wrap gap-3 items-end">
+          <Field label="Desde">
+            <TextInput type="date" value={rango.desde} onChange={(e) => setRango({ ...rango, desde: e.target.value })} />
+          </Field>
+          <Field label="Hasta">
+            <TextInput type="date" value={rango.hasta} onChange={(e) => setRango({ ...rango, hasta: e.target.value })} />
+          </Field>
+          <Button variant="ghost" onClick={() => setRango(rangoMesStaff(0))}>Este mes</Button>
+          <Button variant="ghost" onClick={() => setRango(rangoMesStaff(-1))}>Mes anterior</Button>
+          <Field label="Ordenar ranking por">
+            <Select value={orden} onChange={(e) => setOrden(e.target.value)}>
+              <option value="comision">Comisión a pagar</option>
+              <option value="ventas">Ventas generadas</option>
+              <option value="servicios">Servicios realizados</option>
+            </Select>
+          </Field>
+          <Button variant="ghost" onClick={descargar} disabled={!rangoValido || filas.length === 0}><Download size={15} /> Descargar Excel</Button>
+        </div>
+        {!rangoValido && <div style={{ fontSize: 12.5, color: C.rust, marginTop: 8 }}>Revisá las fechas: "Desde" tiene que ser anterior o igual a "Hasta".</div>}
+      </Card>
+
+      {sinStaffCargado ? (
+        <Card style={{ padding: 24, textAlign: "center", color: C.inkFaint, fontSize: 14 }}>
+          Todavía no cargaste a nadie en el Staff. Hacelo en Configuración, y asigná el profesional al vender.
+        </Card>
+      ) : (
+        <>
+          <div className="flex gap-4 flex-wrap">
+            <KPI label="Comisiones a pagar" value={money(totalComision)} accent={C.green} />
+            <KPI label="Ventas con profesional" value={money(totalVentas)} accent={C.ink} />
+            <KPI label="Primer puesto" value={lider ? lider.nombre : "—"} accent={C.gold} />
+          </div>
+
+          <Card style={{ padding: 0, overflow: "hidden" }}>
+            <Tbl columns={10} style={{ fontSize: 13 }}>
+              <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
+                {["#", "Profesional", "Servicios", "Ventas serv.", "Comisión serv.", "Productos", "Ventas prod.", "Comisión prod.", "Total ventas", "Total a pagar"].map((h) => (
+                  <TblTh key={h} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>
+                ))}
+              </TblHeadRow>
+              {ordenadas.map((f, i) => (
+                <TblRow
+                  key={f.id}
+                  onClick={() => setSel(sel === f.id ? null : f.id)}
+                  style={{ borderTop: `1px solid ${C.line}`, cursor: "pointer", background: sel === f.id ? C.greenSoft : "transparent" }}
+                >
+                  <TblCell data-label="#" style={{ padding: "8px 12px", color: C.inkFaint }}>{activa(f) ? i + 1 : "—"}</TblCell>
+                  <TblCell data-label="Profesional" style={{ padding: "8px 12px", fontWeight: 600 }}>
+                    {sel === f.id ? <ChevronDown size={13} style={{ marginRight: 4, verticalAlign: "middle" }} /> : <ChevronRight size={13} style={{ marginRight: 4, verticalAlign: "middle" }} />}
+                    {f.nombre}
+                  </TblCell>
+                  <TblCell data-label="Servicios" style={{ padding: "8px 12px" }}>{f.servicios.cant}</TblCell>
+                  <TblCell data-label="Ventas serv." style={{ padding: "8px 12px" }}>{money(f.servicios.ventas)}</TblCell>
+                  <TblCell data-label="Comisión serv." style={{ padding: "8px 12px" }}>{money(f.servicios.comision)}</TblCell>
+                  <TblCell data-label="Productos" style={{ padding: "8px 12px" }}>{f.productos.cant}</TblCell>
+                  <TblCell data-label="Ventas prod." style={{ padding: "8px 12px" }}>{money(f.productos.ventas)}</TblCell>
+                  <TblCell data-label="Comisión prod." style={{ padding: "8px 12px" }}>{money(f.productos.comision)}</TblCell>
+                  <TblCell data-label="Total ventas" style={{ padding: "8px 12px" }}>{money(f.totalVentas)}</TblCell>
+                  <TblCell data-label="Total a pagar" style={{ padding: "8px 12px", fontWeight: 700, color: C.green }}>{money(f.comision)}</TblCell>
+                </TblRow>
+              ))}
+              <TblRow style={{ borderTop: `2px solid ${C.line}`, background: C.bg }}>
+                <TblCell data-label="" style={{ padding: "8px 12px" }}></TblCell>
+                <TblCell data-label="" style={{ padding: "8px 12px", fontWeight: 700 }}>Total</TblCell>
+                <TblCell data-label="Servicios" style={{ padding: "8px 12px", fontWeight: 600 }}>{filas.reduce((a, f) => a + f.servicios.cant, 0)}</TblCell>
+                <TblCell data-label="Ventas serv." style={{ padding: "8px 12px", fontWeight: 600 }}>{money(filas.reduce((a, f) => a + f.servicios.ventas, 0))}</TblCell>
+                <TblCell data-label="Comisión serv." style={{ padding: "8px 12px", fontWeight: 600 }}>{money(filas.reduce((a, f) => a + f.servicios.comision, 0))}</TblCell>
+                <TblCell data-label="Productos" style={{ padding: "8px 12px", fontWeight: 600 }}>{filas.reduce((a, f) => a + f.productos.cant, 0)}</TblCell>
+                <TblCell data-label="Ventas prod." style={{ padding: "8px 12px", fontWeight: 600 }}>{money(filas.reduce((a, f) => a + f.productos.ventas, 0))}</TblCell>
+                <TblCell data-label="Comisión prod." style={{ padding: "8px 12px", fontWeight: 600 }}>{money(filas.reduce((a, f) => a + f.productos.comision, 0))}</TblCell>
+                <TblCell data-label="Total ventas" style={{ padding: "8px 12px", fontWeight: 700 }}>{money(totalVentas)}</TblCell>
+                <TblCell data-label="Total a pagar" style={{ padding: "8px 12px", fontWeight: 700, color: C.green }}>{money(totalComision)}</TblCell>
+              </TblRow>
+            </Tbl>
+          </Card>
+
+          {sinAsignar.lineas > 0 && (
+            <div style={{ fontSize: 12.5, color: C.inkSoft }}>
+              Hay {sinAsignar.lineas} línea{sinAsignar.lineas === 1 ? "" : "s"} de venta sin profesional asignado en este período ({money(sinAsignar.total)}): no generan comisión.
+            </div>
+          )}
+
+          {selFila && (
+            <Card style={{ padding: 16 }}>
+              <div className="flex items-center justify-between flex-wrap gap-2" style={{ marginBottom: 10 }}>
+                <div style={{ fontWeight: 600 }}>Detalle de {selFila.nombre} — {rango.desde} a {rango.hasta}</div>
+                <Button variant="ghost" style={{ padding: "4px 10px", fontSize: 12.5 }} onClick={() => setSel(null)}><X size={13} /> Cerrar</Button>
+              </div>
+              {selFila.detalle.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.inkFaint }}>No tiene ventas asignadas en este período.</div>
+              ) : (
+                <Tbl columns={7} style={{ fontSize: 13 }}>
+                  <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
+                    {["Fecha", "Ítem", "Tipo", "Cant.", "Total", "% com.", "Comisión"].map((h) => (
+                      <TblTh key={h} style={{ padding: "8px 10px", fontWeight: 600 }}>{h}</TblTh>
+                    ))}
+                  </TblHeadRow>
+                  {selFila.detalle.map((d, i) => (
+                    <TblRow key={i} style={{ borderTop: `1px solid ${C.line}` }}>
+                      <TblCell data-label="Fecha" style={{ padding: "6px 10px" }}>{d.fecha}</TblCell>
+                      <TblCell data-label="Ítem" style={{ padding: "6px 10px" }}>{d.item}</TblCell>
+                      <TblCell data-label="Tipo" style={{ padding: "6px 10px", color: C.inkSoft }}>{d.tipo}</TblCell>
+                      <TblCell data-label="Cant." style={{ padding: "6px 10px" }}>{d.cantidad}</TblCell>
+                      <TblCell data-label="Total" style={{ padding: "6px 10px" }}>{money(d.total)}</TblCell>
+                      <TblCell data-label="% com." style={{ padding: "6px 10px", color: C.inkSoft }}>{d.pct ? `${d.pct}%` : "—"}</TblCell>
+                      <TblCell data-label="Comisión" style={{ padding: "6px 10px", fontWeight: 600 }}>{money(d.comision)}</TblCell>
+                    </TblRow>
+                  ))}
+                </Tbl>
+              )}
+            </Card>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -4423,6 +5486,8 @@ function ConfigView({ data, update, esAsesora, linkInstructivo, instructivoGloba
     hoja("Movimientos de Stock", data.movStock);
     hoja("Clientes", data.clientes);
     hoja("Productos", data.productos.filter((p) => !esCombo(p)));
+    hoja("Servicios y Sillón-Gab", data.servicios || []);
+    hoja("Staff", data.staff || []);
     hoja(
       "Combos",
       data.productos.filter(esCombo).map((p) => {
@@ -5005,6 +6070,7 @@ export function Negocio({ data, update, cabecera, esAsesora, instructivoGlobal =
     gastos: <GastosView data={data} update={update} esAsesora={esAsesora} />,
     movimientos: <MovimientosView data={data} update={update} />,
     clientes: <ClientesView data={data} update={update} />,
+    staff: <StaffView data={data} />,
     arqueo: <ArqueoView data={data} update={update} />,
     productos: <ProductosView data={data} update={update} />,
     importar: <ImportarView data={data} update={update} />,
