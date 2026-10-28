@@ -1290,6 +1290,7 @@ function VentasView({ data, update, esAsesora }) {
     chequeVto: "",
     observaciones: "",
     descuentoManual: 0,
+    sena: 0,
     codigoDescuentoId: "",
     clienteId: "",
   });
@@ -1388,13 +1389,17 @@ function VentasView({ data, update, esAsesora }) {
   const pctFinal = Math.min(descuentoPct, 100);
   const descuentoMontoTotal = totalBrutoCarrito * (pctFinal / 100);
   const totalNetoCarrito = totalBrutoCarrito - descuentoMontoTotal;
+  const senaCalc = repartirSena(carrito, pctFinal, orden.sena);
+  const totalACobrar = totalNetoCarrito - senaCalc.aplicada;
 
   function confirmarVenta() {
     setLocalError("");
     try {
       if (carrito.length === 0) { setLocalError("Agregá al menos un producto antes de registrar."); return; }
       if (esCtaCte && !orden.clienteId) { setLocalError("Elegí un cliente para una venta a Cuenta Corriente."); return; }
-      if (staff.length > 0 && carrito.some((it) => it.tipoItem === "servicio" && !it.staffId)) { setLocalError("Elegí quién realizó cada servicio (columna Profesional)."); return; }
+      // El profesional se exige solo en los servicios que generan comisión (una seña, por ejemplo, no tiene).
+      if (staff.length > 0 && carrito.some((it) => it.tipoItem === "servicio" && !it.staffId && Number(it.comisionStaffPct) > 0)) { setLocalError("Elegí quién realizó cada servicio con comisión (columna Profesional)."); return; }
+      if (senaCalc.excede) { setLocalError(`La seña (${money(senaCalc.ingresada)}) no puede superar el total de los servicios (${money(senaCalc.netoServicios)}): se descuenta solo de los servicios.`); return; }
       if (esCheque && !orden.chequeVto) { setLocalError("Indicá la fecha de vencimiento del cheque."); return; }
       const ventaId = uid();
       const cliente = esCtaCte ? (data.clientes || []).find((c) => c.id === orden.clienteId) : null;
@@ -1408,6 +1413,7 @@ function VentasView({ data, update, esAsesora }) {
       const nuevasVentas = [];
       carrito.forEach((it) => {
         const itemDescuento = totalBrutoCarrito ? (it.subtotal / totalBrutoCarrito) * descuentoMontoTotal : 0;
+        const senaLinea = Math.round((senaCalc.porLinea.get(it.tempId) || 0) * 100) / 100;
         // Comisión del profesional (staff): se calcula sobre el total de la línea con el descuento ya aplicado
         // y queda congelada. OJO: no confundir con comisionPctEstimada/comisionMonto, que son la comisión del medio de pago.
         const staffObj = staff.find((s) => s.id === it.staffId);
@@ -1451,7 +1457,10 @@ function VentasView({ data, update, esAsesora }) {
             precioUnitario: it.precioUnitario,
             totalBruto: it.subtotal,
             descuentoMonto: itemDescuento,
-            total: it.subtotal - itemDescuento,
+            // La seña baja lo que se cobra hoy (total), pero la comisión (camposStaff, más abajo) se calcula
+            // sobre el valor completo neto de descuentos.
+            total: it.subtotal - itemDescuento - senaLinea,
+            ...(senaLinea > 0 ? { senaMonto: senaLinea } : {}),
             tipoItem: it.tipoItem || "producto",
             costoUnitario: it.costoUnitario || 0,
             detalle: it.detalle ? it.detalle.trim() : undefined,
@@ -1508,7 +1517,7 @@ function VentasView({ data, update, esAsesora }) {
 
       update({ ...data, ventas: [...nuevasVentas, ...data.ventas], productos, movStock });
       setCarrito([]);
-      setOrden((f) => ({ ...f, observaciones: "", descuentoManual: 0, codigoDescuentoId: "", clienteId: "", chequeNumero: "", chequeBanco: "", chequeVto: "" }));
+      setOrden((f) => ({ ...f, observaciones: "", descuentoManual: 0, sena: 0, codigoDescuentoId: "", clienteId: "", chequeNumero: "", chequeBanco: "", chequeVto: "" }));
       setVerObs(false);
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 2500);
@@ -1662,6 +1671,12 @@ function VentasView({ data, update, esAsesora }) {
                 style={{ width: 80 }}
               />
             </Field>
+            {carrito.some((it) => it.tipoItem === "servicio") && (
+              <Field label="Seña ya cobrada">
+                <MoneyField value={orden.sena} onChange={(v) => setOrden({ ...orden, sena: v })} style={{ width: 120 }} placeholder="0" />
+                {senaCalc.excede && <span style={{ fontSize: 11.5, color: C.rust }}>Supera los servicios ({money(senaCalc.netoServicios)})</span>}
+              </Field>
+            )}
             {hayCodigos && (
               <Field label="Código de descuento">
                 <Select
@@ -1741,12 +1756,13 @@ function VentasView({ data, update, esAsesora }) {
             <div style={{ fontSize: 12.5, color: C.inkSoft }}>
               Bruto: <strong>{money(totalBrutoCarrito)}</strong>
               {descuentoPct > 0 && <> · Descuento ({pct(descuentoPct)}): <strong style={{ color: C.rust }}>-{money(descuentoMontoTotal)}</strong></>}
+              {senaCalc.aplicada > 0 && <> · Seña ya cobrada: <strong style={{ color: C.rust }}>-{money(senaCalc.aplicada)}</strong></>}
               {!verFecha && <> · {orden.fecha}</>}
             </div>
             <div className="flex items-center gap-4">
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 11.5, color: C.inkSoft, textTransform: "uppercase", letterSpacing: 0.5 }}>Total</div>
-                <div style={{ fontSize: 30, fontWeight: 700, color: C.green, lineHeight: 1.1 }}>{money(totalNetoCarrito)}</div>
+                <div style={{ fontSize: 11.5, color: C.inkSoft, textTransform: "uppercase", letterSpacing: 0.5 }}>{senaCalc.aplicada > 0 ? "A cobrar ahora" : "Total"}</div>
+                <div style={{ fontSize: 30, fontWeight: 700, color: C.green, lineHeight: 1.1 }}>{money(totalACobrar)}</div>
               </div>
               <Button type="button" onClick={confirmarVenta} disabled={esCtaCte && !orden.clienteId} style={{ padding: "12px 22px", fontSize: 15 }}>
                 <Check size={17} /> Registrar venta
@@ -1786,7 +1802,10 @@ function VentasView({ data, update, esAsesora }) {
                   <TblCell data-label="Lista" style={{ padding: "8px 12px" }}>{v.listaLabel || v.lista}</TblCell>
                   <TblCell data-label="Bruto" style={{ padding: "8px 12px" }}>{money(v.totalBruto ?? v.total)}</TblCell>
                   <TblCell data-label="Desc." style={{ padding: "8px 12px", color: C.rust }}>{v.descuentoMonto ? `-${money(v.descuentoMonto)}` : "—"}</TblCell>
-                  <TblCell data-label="Total" style={{ padding: "8px 12px", fontWeight: 600 }}>{money(v.total)}</TblCell>
+                  <TblCell data-label="Total" style={{ padding: "8px 12px", fontWeight: 600 }}>
+                    {money(v.total)}
+                    {v.senaMonto > 0 && <div style={{ fontSize: 11, fontWeight: 400, color: C.inkFaint }}>seña -{money(v.senaMonto)}</div>}
+                  </TblCell>
                   <TblCell data-label="Punto de venta" style={{ padding: "8px 12px" }}>{v.puntoVenta}</TblCell>
                   <TblCell data-label="Medio" style={{ padding: "8px 12px" }}>
                   {v.medioPago}
@@ -2322,6 +2341,21 @@ function BuscadorItem({ items, valor, seleccionado, campoPrecio, onTexto, onEleg
   );
 }
 
+// Seña ya cobrada (por ejemplo, vía el turnero): se descuenta SOLO de los servicios del ticket, repartida según el
+// valor de cada servicio (ya con descuento). Baja lo que se cobra hoy, pero NO la base de la comisión: el profesional
+// cobra comisión por el valor completo del servicio, neto de descuentos. La seña en sí se cargó antes, el día que
+// se recibió, como una venta del ítem "Seña x servicio"; por eso acá no se vuelve a contar.
+function repartirSena(carrito, pctDescuento, sena) {
+  const factor = 1 - Math.min(Math.max(Number(pctDescuento) || 0, 0), 100) / 100;
+  const servicios = carrito.filter((it) => it.tipoItem === "servicio");
+  const netoServicios = servicios.reduce((a, it) => a + it.subtotal * factor, 0);
+  const ingresada = servicios.length > 0 ? Math.max(0, Number(sena) || 0) : 0; // sin servicios en el ticket, no hay de dónde descontar
+  const aplicada = Math.min(ingresada, netoServicios);
+  const porLinea = new Map();
+  servicios.forEach((it) => porLinea.set(it.tempId, netoServicios > 0 ? aplicada * ((it.subtotal * factor) / netoServicios) : 0));
+  return { netoServicios, ingresada, aplicada, excede: ingresada > netoServicios + 0.01, porLinea };
+}
+
 // Servicios ("corte", "coloración"…) y Sillón/Gabinete (alquileres). No llevan stock, pero se
 // pueden vender desde Ventas. El servicio lleva un % de comisión para quien lo realiza; el
 // alquiler de sillón/gabinete no genera comisión. La Lista 2 se calcula sola desde la Lista 1
@@ -2335,6 +2369,10 @@ function ServiciosView({ data, update, tipo, palabras }) {
   const tieneL2 = listas.includes("mayorista");
   const lista = (data.servicios || []).filter((sv) => (sv.tipo || "servicio") === tipo);
   const vista = lista.filter((sv) => palabras.length === 0 || palabras.every((w) => normalizarTexto([sv.nombre, sv.codigo, sv.familia].join(" ")).includes(w)));
+  // Columnas: el Código y cada lista de precio se ocultan si ningún ítem de este tipo los usa
+  // (con la tabla vacía se muestran todas, para que se vea la estructura).
+  const verCodigo = lista.length === 0 || lista.some((sv) => (sv.codigo || "").trim());
+  const listasVisibles = lista.length === 0 ? listas : listas.filter((k) => lista.some((sv) => Number(sv[LISTA_CAMPO[k]]) > 0));
   const calc = form ? calcularPrecios({ ...form, costo: "", markupPct: "" }, data) : null;
   const aj2 = data.ajusteLista2Pct;
   const hayAj2 = aj2 !== "" && aj2 != null && !isNaN(Number(aj2));
@@ -2440,22 +2478,22 @@ function ServiciosView({ data, update, tipo, palabras }) {
       {palabras.length > 0 && <div style={{ fontSize: 12.5, color: C.inkSoft }}>{vista.length} de {lista.length}</div>}
 
       <Card style={{ padding: 0, overflow: "hidden" }}>
-        <Tbl columns={4 + listas.length + (esServicio ? 1 : 0)} style={{ fontSize: 13 }}>
+        <Tbl columns={3 + (verCodigo ? 1 : 0) + listasVisibles.length + (esServicio ? 1 : 0)} style={{ fontSize: 13 }}>
           <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
-            {[esServicio ? "Servicio" : "Sillón / Gabinete", "Código", "Familia", ...listas.map((k) => labels[k] || LISTA_LABEL_DEFAULT[k]), ...(esServicio ? ["Comisión"] : []), ""].map((h, i) => (
+            {["Nombre", ...(verCodigo ? ["Código"] : []), "Familia", ...listasVisibles.map((k) => `Precio ${labels[k] || LISTA_LABEL_DEFAULT[k]}`), ...(esServicio ? ["% comisión"] : []), ""].map((h, i) => (
               <TblTh key={i} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>
             ))}
           </TblHeadRow>
           {vista.map((sv) => (
             <TblRow key={sv.id} style={{ borderTop: `1px solid ${C.line}` }}>
               <TblCell data-label="Nombre" style={{ padding: "8px 12px", fontWeight: 600 }}>{sv.nombre}</TblCell>
-              <TblCell data-label="Código" style={{ padding: "8px 12px", color: C.inkSoft }}>{sv.codigo || "—"}</TblCell>
+              {verCodigo && <TblCell data-label="Código" style={{ padding: "8px 12px", color: C.inkSoft }}>{sv.codigo || "—"}</TblCell>}
               <TblCell data-label="Familia" style={{ padding: "8px 12px" }}>{sv.familia}</TblCell>
-              {listas.map((k) => (
-                <TblCell key={k} data-label={labels[k] || LISTA_LABEL_DEFAULT[k]} style={{ padding: "8px 12px" }}>{money(sv[LISTA_CAMPO[k]] || 0)}</TblCell>
+              {listasVisibles.map((k) => (
+                <TblCell key={k} data-label={`Precio ${labels[k] || LISTA_LABEL_DEFAULT[k]}`} style={{ padding: "8px 12px" }}>{Number(sv[LISTA_CAMPO[k]]) > 0 ? money(sv[LISTA_CAMPO[k]]) : "—"}</TblCell>
               ))}
               {esServicio && (
-                <TblCell data-label="Comisión" style={{ padding: "8px 12px", color: C.inkSoft }}>{Number(sv.comisionPct) > 0 ? `${sv.comisionPct}%` : "—"}</TblCell>
+                <TblCell data-label="% comisión" style={{ padding: "8px 12px", color: C.inkSoft }}>{Number(sv.comisionPct) > 0 ? `${sv.comisionPct}%` : "—"}</TblCell>
               )}
               <TblCell data-label="" style={{ padding: "8px 12px" }}>
                 <span className="flex items-center gap-3">
@@ -2626,6 +2664,12 @@ function ProductosView({ data, update }) {
     return palabrasBusqueda.every((w) => texto.includes(w));
   };
   const productosVista = productosNormales.filter(coincideBusqueda);
+  // Columnas que se ocultan si ningún producto las usa (Código, Marca, Costo y listas de precio sin valores).
+  const hayProd = productosNormales.length > 0;
+  const verCodigoP = !hayProd || productosNormales.some((p) => (p.codigo || "").trim());
+  const verMarcaP = !hayProd || productosNormales.some((p) => (p.marca || "").trim());
+  const verCostoP = !hayProd || productosNormales.some((p) => Number(p.costo) > 0);
+  const listasVisP = !hayProd ? listasActivas(data) : listasActivas(data).filter((k) => productosNormales.some((p) => Number(p[LISTA_CAMPO[k]]) > 0));
   const combosVista = combos.filter(coincideBusqueda);
 
   function crearProducto() {
@@ -2837,25 +2881,25 @@ function ProductosView({ data, update }) {
             />
           ) : (
           <Card style={{ padding: 0, overflow: "visible" }}>
-            <Tbl columns={8 + listasActivas(data).length} style={{ fontSize: 13 }}>
+            <Tbl columns={5 + (verCodigoP ? 1 : 0) + (verMarcaP ? 1 : 0) + (verCostoP ? 1 : 0) + listasVisP.length} style={{ fontSize: 13 }}>
                 <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
-                  {["Producto", "Código", "Familia", "Marca", "Costo", ...listasActivas(data).map((k) => `P. ${data.listaLabels?.[k] || LISTA_LABEL_DEFAULT[k]}`), "Stock hoy", "Stock mín.", ""].map((h, i) => (
+                  {["Producto", ...(verCodigoP ? ["Código"] : []), "Familia", ...(verMarcaP ? ["Marca"] : []), ...(verCostoP ? ["Costo"] : []), ...listasVisP.map((k) => `P. ${data.listaLabels?.[k] || LISTA_LABEL_DEFAULT[k]}`), "Stock hoy", "Stock mín.", ""].map((h, i) => (
                     <TblTh key={`${h}-${i}`} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>
                   ))}
                 </TblHeadRow>
                 {productosVista.map((p) => {
                   const bajo = p.stockMinimo !== "" && p.stockMinimo != null && Number(p.stock) <= Number(p.stockMinimo);
-                  const camposPrecioActivos = listasActivas(data).map((k) => LISTA_CAMPO[k]);
+                  const camposPrecioActivos = listasVisP.map((k) => LISTA_CAMPO[k]);
                   const labelPorCampo = {};
-                  listasActivas(data).forEach((k) => { labelPorCampo[LISTA_CAMPO[k]] = `P. ${data.listaLabels?.[k] || LISTA_LABEL_DEFAULT[k]}`; });
+                  listasVisP.forEach((k) => { labelPorCampo[LISTA_CAMPO[k]] = `P. ${data.listaLabels?.[k] || LISTA_LABEL_DEFAULT[k]}`; });
                   return (
                     <React.Fragment key={p.id}>
                       <TblRow style={{ borderTop: `1px solid ${C.line}` }}>
                         <TblCell data-label="Producto" style={{ padding: "8px 12px", fontWeight: 500 }}>{p.nombre}</TblCell>
-                        <TblCell data-label="Código" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.codigo || "—"}</TblCell>
+                        {verCodigoP && <TblCell data-label="Código" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.codigo || "—"}</TblCell>}
                         <TblCell data-label="Familia" style={{ padding: "8px 12px" }}>{p.familia}</TblCell>
-                        <TblCell data-label="Marca" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.marca || "—"}{p.soloInterno && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· uso interno</span>}</TblCell>
-                        <TblCell data-label="Costo" style={{ padding: "8px 12px", color: C.inkSoft }}>{Number(p.costo) > 0 ? money(p.costo) : "—"}</TblCell>
+                        {verMarcaP && <TblCell data-label="Marca" style={{ padding: "8px 12px", color: C.inkSoft }}>{p.marca || "—"}{p.soloInterno && <span style={{ marginLeft: 6, fontSize: 11, color: C.gold, fontWeight: 600 }}>· uso interno</span>}</TblCell>}
+                        {verCostoP && <TblCell data-label="Costo" style={{ padding: "8px 12px", color: C.inkSoft }}>{Number(p.costo) > 0 ? money(p.costo) : "—"}</TblCell>}
                         {camposPrecioActivos.map((campo) => (
                           <TblCell key={campo} data-label={labelPorCampo[campo]} style={{ padding: "8px 12px" }}>{money(p[campo])}</TblCell>
                         ))}
@@ -3028,7 +3072,7 @@ function ProductosView({ data, update }) {
       )}
 
       {(vista === "servicios" || vista === "sillon") && (
-        <ServiciosView key={vista} data={data} update={update} tipo={vista} palabras={palabrasBusqueda} />
+        <ServiciosView key={vista} data={data} update={update} tipo={vista === "servicios" ? "servicio" : "sillon"} palabras={palabrasBusqueda} />
       )}
 
       {eliminarPendiente && (
