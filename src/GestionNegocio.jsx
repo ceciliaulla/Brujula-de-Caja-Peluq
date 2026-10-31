@@ -8,7 +8,7 @@ import {
   Plus, Trash2, Upload, Package, ShoppingCart, Receipt,
   BarChart3, Settings, X, Check, AlertTriangle, PackagePlus, Pencil,
   Download, Wallet, ArrowLeftRight, HelpCircle, MessageSquarePlus,
-  ChevronDown, ChevronRight, Users, Menu, ArrowLeft, Search, Scissors,
+  ChevronDown, ChevronRight, Users, Menu, ArrowLeft, Search, Scissors, Banknote, Truck,
 } from "lucide-react";
 
 const C = {
@@ -124,6 +124,8 @@ const MOTIVOS_MOVIMIENTO = [
   { id: "compra_inversion", label: "Compra de bienes (inversión)", tipo: "egreso", flujo: "inversion" },
   { id: "venta_bien", label: "Venta de un bien de uso", tipo: "ingreso", flujo: "inversion" },
   { id: "cobro_cta_cte", label: "Cobro de Cuenta Corriente", tipo: "ingreso", flujo: null, requiereCliente: true },
+  // No crea un movimiento: se registra como un gasto pagado (rubro de la cuenta) que achica el saldo de la deuda.
+  { id: "pago_cuenta", label: "Pago de cuenta a pagar", tipo: "egreso", flujo: null, esPagoCuenta: true },
   { id: "ajuste_ingreso", label: "Ajuste a favor", tipo: "ingreso", flujo: null },
   { id: "ajuste_egreso", label: "Ajuste en contra", tipo: "egreso", flujo: null },
 ];
@@ -327,6 +329,9 @@ function defaultData() {
     gastos: [],
     movimientos: [],
     movStock: [],
+    compras: [], // compras de mercadería: { id, fecha, proveedor, comprobante, rubro, lineas[], total, pagado, saldo, ... }
+    cuentasPagar: [], // deudas: { id, fecha, acreedor, rubro, detalle, total, vencimiento, compraId? }. El saldo = total - gastos con cuentaPagarId
+    acreedores: [], // nombres de proveedores y otros acreedores (para autocompletar)
     arqueos: [],
     clientes: [],
     codigosDescuento: [],
@@ -373,7 +378,7 @@ export function normalizarData(parcial) {
 
 // Nombres de las listas que en Firestore viven como subcolecciones (una orden/venta/gasto
 // por documento) en vez de como un array dentro del documento principal del negocio.
-export const SUBCOLECCIONES_NEGOCIO = ["ventas", "gastos", "movimientos", "movStock", "arqueos", "clientes", "productos"];
+export const SUBCOLECCIONES_NEGOCIO = ["ventas", "gastos", "movimientos", "movStock", "arqueos", "clientes", "productos", "compras", "cuentasPagar"];
 
 /* ---------- small UI atoms ---------- */
 function Card({ children, style, ...rest }) {
@@ -610,6 +615,7 @@ function Sidebar({ tab, setTab, nombreNegocio, open, onClose, stockBajoCount = 0
     { id: "dashboard", label: "Indicadores", icon: BarChart3 },
     { id: "ventas", label: "Ventas", icon: ShoppingCart },
     { id: "gastos", label: "Gastos", icon: Receipt },
+    { id: "cuentaspagar", label: "Cuentas a pagar", icon: Banknote },
     { id: "movimientos", label: "Movimientos de Caja", icon: ArrowLeftRight },
     { id: "clientes", label: "Clientes", icon: Users },
     { id: "staff", label: "Staff", icon: Scissors },
@@ -762,7 +768,7 @@ function Dashboard({ data }) {
   const totalGastos = periodo.gastos.reduce((a, g) => a + Number(g.monto), 0);
   const gastosPctIngresos = totalVentas ? (totalGastos / totalVentas) * 100 : 0;
   // ---- A cobrar / A pagar: foto de HOY (no depende del período elegido arriba) ----
-  const { aCobrar, aPagar } = useMemo(() => {
+  const { aCobrar, aPagar, aPagarCuentas } = useMemo(() => {
     const hoy = todayStr();
     const en30 = sumarDias(hoy, 30);
     const vacio = () => ({ vencido: 0, prox30: 0, despues: 0, sinFecha: 0, total: 0 });
@@ -783,9 +789,14 @@ function Dashboard({ data }) {
     data.gastos.forEach((g) => {
       if (!gastoDebitado(g)) poner(pagar, g.fechaVtoCheque, Number(g.monto));
     });
+    const cuentasP = vacio();
+    (data.cuentasPagar || []).forEach((c) => {
+      const saldo = saldoCuenta(c, data.gastos);
+      if (saldo > 0.009) poner(cuentasP, c.vencimiento, saldo);
+    });
     const total = vacio();
     [tarjetas, cheques, ctacte].forEach((f) => Object.keys(total).forEach((k) => (total[k] += f[k])));
-    return { aCobrar: { tarjetas, cheques, ctacte, total }, aPagar: pagar };
+    return { aCobrar: { tarjetas, cheques, ctacte, total }, aPagar: pagar, aPagarCuentas: cuentasP };
   }, [data]);
 
   // ---- Flujo de fondos mensual (histórico): por la fecha en que el dinero realmente entró o salió ----
@@ -1027,7 +1038,7 @@ function Dashboard({ data }) {
         <KPI label="Punto de equilibrio (aprox.)" value={puntoEquilibrio != null ? money(puntoEquilibrio) : "N/D"} accent={C.ink} />
       </div>
 
-      {(aCobrar.total.total > 0 || aPagar.total > 0) && (
+      {(aCobrar.total.total > 0 || aPagar.total > 0 || aPagarCuentas.total > 0) && (
         <Card style={{ padding: 18 }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>A cobrar y a pagar (a hoy)</div>
           <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 12 }}>
@@ -1046,6 +1057,7 @@ function Dashboard({ data }) {
                 ["Cuenta corriente de clientes", aCobrar.ctacte, false],
                 ["Total a cobrar", aCobrar.total, true],
                 ["Cheques emitidos (a pagar)", aPagar, false],
+                ["Cuentas a pagar (proveedores y otros)", aPagarCuentas, false],
               ]
                 .filter(([label, f, destacada]) => destacada || f.total > 0)
                 .map(([label, f, destacada]) => {
@@ -1861,6 +1873,11 @@ function VentasView({ data, update, esAsesora }) {
 function GastosView({ data, update, esAsesora }) {
   const [form, setForm] = useState({ fecha: todayStr(), rubro: data.rubros[0] || "", monto: "", detalle: "", medioPago: data.medios[0] || "", observaciones: "", chequeNumero: "", chequeBanco: "", fechaVtoCheque: "" });
   const esChequeG = medioFechaPropia(data, form.medioPago);
+  // Pago parcial: "Pagado ahora" vacío = se paga todo. Si es menos, el resto queda como cuenta a pagar a un acreedor.
+  const [parcial, setParcial] = useState({ pagado: "", acreedor: "", vencimiento: "" });
+  const montoGasto = Number(form.monto) || 0;
+  const pagadoGasto = parcial.pagado === "" ? montoGasto : Number(parcial.pagado) || 0;
+  const restoGasto = Math.round((montoGasto - pagadoGasto) * 100) / 100;
   const [verObs, setVerObs] = useState(false);
   const [verHistorico, setVerHistorico] = useState(false);
   const [localError, setLocalError] = useState("");
@@ -1873,10 +1890,21 @@ function GastosView({ data, update, esAsesora }) {
     try {
       const monto = Number(form.monto) || 0;
       if (!monto) { setLocalError("Falta indicar un monto mayor a cero."); return; }
-      if (esChequeG && !form.fechaVtoCheque) { setLocalError("Indicá la fecha de vencimiento del cheque."); return; }
-      const gasto = { id: uid(), ...form, monto };
+      if (pagadoGasto > monto + 0.001) { setLocalError("Lo pagado ahora no puede superar el monto del gasto."); return; }
+      if (restoGasto > 0.009 && !parcial.acreedor.trim()) { setLocalError("Indicá a quién le queda pendiente el resto (acreedor)."); return; }
+      if (esChequeG && pagadoGasto > 0 && !form.fechaVtoCheque) { setLocalError("Indicá la fecha de vencimiento del cheque."); return; }
+      const acreedor = acreedorCanonico(data.acreedores, parcial.acreedor);
+      const cuentaId = restoGasto > 0.009 ? uid() : null;
+      const gasto = { id: uid(), ...form, monto: pagadoGasto, ...(cuentaId ? { cuentaPagarId: cuentaId } : {}) };
       if (!esChequeG) { delete gasto.chequeNumero; delete gasto.chequeBanco; delete gasto.fechaVtoCheque; }
-      update({ ...data, gastos: [gasto, ...data.gastos] });
+      const cuenta = cuentaId ? { id: cuentaId, fecha: form.fecha, acreedor, rubro: form.rubro, detalle: form.detalle, total: monto, vencimiento: parcial.vencimiento || "", observaciones: form.observaciones } : null;
+      update({
+        ...data,
+        gastos: pagadoGasto > 0 ? [gasto, ...data.gastos] : data.gastos,
+        cuentasPagar: cuenta ? [cuenta, ...(data.cuentasPagar || [])] : data.cuentasPagar || [],
+        acreedores: cuenta ? agregarAcreedor(data.acreedores, acreedor) : data.acreedores || [],
+      });
+      setParcial({ pagado: "", acreedor: "", vencimiento: "" });
       setForm({ fecha: todayStr(), rubro: data.rubros[0] || "", monto: "", detalle: "", medioPago: data.medios[0] || "", observaciones: "", chequeNumero: "", chequeBanco: "", fechaVtoCheque: "" });
       setVerObs(false);
       setJustSaved(true);
@@ -1913,12 +1941,26 @@ function GastosView({ data, update, esAsesora }) {
           <Field label="Monto">
             <MoneyField value={form.monto} onChange={(v) => setForm({ ...form, monto: v })} style={{ width: 110 }} placeholder="0" />
           </Field>
+          <Field label="Pagado ahora">
+            <TextInput type="number" inputMode="decimal" min="0" value={parcial.pagado} onChange={(e) => setParcial({ ...parcial, pagado: e.target.value })} placeholder="Todo" style={{ width: 110 }} />
+          </Field>
+          {restoGasto > 0.009 && (
+            <>
+              <Field label="Acreedor (a quién se le debe el resto)">
+                <TextInput list="lista-acreedores-gasto" value={parcial.acreedor} onChange={(e) => setParcial({ ...parcial, acreedor: e.target.value })} style={{ width: 190 }} placeholder="Proveedor u otro" />
+                <datalist id="lista-acreedores-gasto">{(data.acreedores || []).map((a) => <option key={a} value={a} />)}</datalist>
+              </Field>
+              <Field label="Vencimiento del resto (opcional)">
+                <TextInput type="date" value={parcial.vencimiento} onChange={(e) => setParcial({ ...parcial, vencimiento: e.target.value })} />
+              </Field>
+            </>
+          )}
           <Field label="Medio de pago">
             <Select value={form.medioPago} onChange={(e) => setForm({ ...form, medioPago: e.target.value })}>
               {data.medios.map((m) => <option key={m} value={m}>{m}</option>)}
             </Select>
           </Field>
-          {esChequeG && (
+          {esChequeG && pagadoGasto > 0 && (
             <>
               <Field label="N° de cheque">
                 <TextInput value={form.chequeNumero} onChange={(e) => setForm({ ...form, chequeNumero: e.target.value })} style={{ width: 120 }} />
@@ -1936,6 +1978,11 @@ function GastosView({ data, update, esAsesora }) {
           </Button>
           <Button type="button" onClick={submit}><Plus size={15} /> Registrar gasto</Button>
         </div>
+        {restoGasto > 0.009 && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: C.inkSoft }}>
+            Se registra un gasto por {money(pagadoGasto)} y quedan {money(restoGasto)} como cuenta a pagar{parcial.acreedor.trim() ? ` a ${parcial.acreedor.trim()}` : ""} (la ves en Cuentas a pagar).
+          </div>
+        )}
         {localError && <div style={{ marginTop: 10, fontSize: 13, color: C.rust, fontWeight: 600 }}>{localError}</div>}
         {justSaved && <div style={{ marginTop: 10, fontSize: 13, color: C.green, fontWeight: 600 }}>✓ Gasto registrado</div>}
         {verObs && (
@@ -1970,7 +2017,11 @@ function GastosView({ data, update, esAsesora }) {
                 <TblRow key={g.id} style={{ borderTop: `1px solid ${C.line}` }}>
                   <TblCell data-label="Fecha" style={{ padding: "8px 12px" }}>{g.fecha}</TblCell>
                   <TblCell data-label="Rubro" style={{ padding: "8px 12px" }}>{g.rubro}</TblCell>
-                  <TblCell data-label="Detalle" style={{ padding: "8px 12px", color: C.inkSoft }}>{g.detalle}</TblCell>
+                  <TblCell data-label="Detalle" style={{ padding: "8px 12px", color: C.inkSoft }}>
+                    {g.detalle}
+                    {g.compraId && <div style={{ fontSize: 11, color: C.inkFaint }}>compra de mercadería</div>}
+                    {g.cuentaPagarId && !g.compraId && <div style={{ fontSize: 11, color: C.inkFaint }}>pago de cuenta a pagar</div>}
+                  </TblCell>
                   <TblCell data-label="Monto" style={{ padding: "8px 12px", fontWeight: 600 }}>{money(g.monto)}</TblCell>
                   <TblCell data-label="Medio" style={{ padding: "8px 12px" }}>
                   {g.medioPago}
@@ -2645,7 +2696,8 @@ function ProductosView({ data, update }) {
   const esMobile = useEsMobile();
   const [detalleId, setDetalleId] = useState(null); // producto/combo abierto en la pantalla de detalle
   const [eliminarPendiente, setEliminarPendiente] = useState(null); // ítem a confirmar antes de borrar desde la tabla
-  const [vista, setVista] = useState("productos"); // "productos" | "combos" | "servicios" | "sillon"
+  const [vista, setVista] = useState("productos"); // "productos" | "combos" | "servicios" | "sillon" | "compras"
+  const [abrirCompra, setAbrirCompra] = useState(false); // abre el formulario de compra al entrar a la pestaña Compras
   const [nuevo, setNuevo] = useState(null);
   const [cargaStockId, setCargaStockId] = useState(null);
   const [cargaForm, setCargaForm] = useState({ cantidad: "", motivo: "Compra", fecha: todayStr() });
@@ -2803,10 +2855,16 @@ function ProductosView({ data, update }) {
             <Button variant={vista === "sillon" ? "primary" : "ghost"} onClick={() => setVista("sillon")} style={{ padding: "6px 14px", fontSize: 13 }}>
               Sillón/Gab
             </Button>
+            <Button variant={vista === "compras" ? "primary" : "ghost"} onClick={() => { setAbrirCompra(false); setVista("compras"); }} style={{ padding: "6px 14px", fontSize: 13 }}>
+              Compras
+            </Button>
           </div>
         </div>
         {vista === "productos" ? (
-          <Button onClick={crearProducto}><Plus size={15} /> Nuevo producto</Button>
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="ghost" onClick={() => { setAbrirCompra(true); setVista("compras"); }}><Truck size={15} /> Registrar compra</Button>
+            <Button onClick={crearProducto}><Plus size={15} /> Nuevo producto</Button>
+          </div>
         ) : vista === "combos" ? (
           <Button onClick={crearCombo}><Plus size={15} /> Nuevo combo</Button>
         ) : null}
@@ -2819,7 +2877,7 @@ function ProductosView({ data, update }) {
             type="search"
             value={busqueda}
             onChange={(e) => setBusqueda(e.target.value)}
-            placeholder={vista === "productos" ? "Buscar por nombre, código, marca o familia…" : vista === "combos" ? "Buscar combo por nombre, código o familia…" : "Buscar por nombre, código o familia…"}
+            placeholder={vista === "productos" ? "Buscar por nombre, código, marca o familia…" : vista === "combos" ? "Buscar combo por nombre, código o familia…" : vista === "compras" ? "Buscar compra por proveedor, comprobante o producto…" : "Buscar por nombre, código o familia…"}
             style={{ width: "100%", boxSizing: "border-box", paddingLeft: 32 }}
           />
         </div>
@@ -3069,6 +3127,10 @@ function ProductosView({ data, update }) {
           </Card>
           )}
         </>
+      )}
+
+      {vista === "compras" && (
+        <ComprasView key={abrirCompra ? "nueva" : "lista"} data={data} update={update} esAsesora={esAsesora} palabras={palabrasBusqueda} iniciarAbierto={abrirCompra} />
       )}
 
       {(vista === "servicios" || vista === "sillon") && (
@@ -4811,6 +4873,557 @@ function StaffView({ data }) {
   );
 }
 
+/* ---------- Cuentas a pagar y compras de mercadería ---------- */
+// Criterio: en el flujo de fondos y en los indicadores un gasto cuenta cuando se PAGA. Cuando se paga solo una parte,
+// se registra un gasto por lo pagado y el resto queda como cuenta a pagar (no es un gasto todavía). Cada pago posterior
+// se registra como un gasto (con cuentaPagarId) y achica el saldo. La cuenta guarda el total, la fecha y el rubro de
+// la obligación completa, por si más adelante se arma un Estado de Resultados por devengado.
+function agregarAcreedor(lista, nombre) {
+  const n = String(nombre || "").trim();
+  const actual = lista || [];
+  if (!n) return actual;
+  return actual.some((x) => normalizarTexto(x) === normalizarTexto(n)) ? actual : [...actual, n];
+}
+function acreedorCanonico(lista, nombre) {
+  const n = String(nombre || "").trim();
+  const k = normalizarTexto(n);
+  return (lista || []).find((x) => normalizarTexto(x) === k) || n;
+}
+function pagadoCuenta(cuenta, gastos) {
+  return (gastos || []).filter((g) => g.cuentaPagarId === cuenta.id).reduce((a, g) => a + (Number(g.monto) || 0), 0);
+}
+function saldoCuenta(cuenta, gastos) {
+  return Math.round(((Number(cuenta.total) || 0) - pagadoCuenta(cuenta, gastos)) * 100) / 100;
+}
+function crearGastoPago(cuenta, pago, esCheque) {
+  const g = {
+    id: uid(),
+    fecha: pago.fecha,
+    rubro: cuenta.rubro,
+    detalle: `Pago de ${cuenta.acreedor}${cuenta.detalle ? " – " + cuenta.detalle : ""}`,
+    monto: Number(pago.monto),
+    medioPago: pago.medioPago,
+    observaciones: pago.observaciones || "",
+    cuentaPagarId: cuenta.id,
+  };
+  if (esCheque) {
+    g.chequeNumero = pago.chequeNumero || "";
+    g.chequeBanco = pago.chequeBanco || "";
+    g.fechaVtoCheque = pago.fechaVtoCheque;
+  }
+  return g;
+}
+
+function CuentasPagarView({ data, update, esAsesora }) {
+  const [verSaldadas, setVerSaldadas] = useState(false);
+  const [busqueda, setBusqueda] = useState("");
+  const [abierta, setAbierta] = useState(null);
+  const [pago, setPago] = useState(null);
+  const [error, setError] = useState("");
+  const [pendienteBorrar, setPendienteBorrar] = useState(null);
+  const [avisoPermiso, setAvisoPermiso] = useState(false);
+  const [avisoCompra, setAvisoCompra] = useState(false);
+  const mediosCaja = data.medios.filter((m) => m !== MEDIO_CTA_CTE);
+  const hoy = todayStr();
+  const en30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const cuentas = (data.cuentasPagar || []).map((c) => ({ ...c, pagado: pagadoCuenta(c, data.gastos), saldo: saldoCuenta(c, data.gastos) }));
+  const abiertas = cuentas.filter((c) => c.saldo > 0.009);
+  const totalSaldo = abiertas.reduce((a, c) => a + c.saldo, 0);
+  const vencido = abiertas.filter((c) => c.vencimiento && c.vencimiento < hoy).reduce((a, c) => a + c.saldo, 0);
+  const prox30 = abiertas.filter((c) => c.vencimiento && c.vencimiento >= hoy && c.vencimiento <= en30).reduce((a, c) => a + c.saldo, 0);
+  const palabras = normalizarTexto(busqueda).split(/\s+/).filter(Boolean);
+  const filtradas = cuentas
+    .filter((c) => (verSaldadas || c.saldo > 0.009) && (palabras.length === 0 || palabras.every((w) => normalizarTexto([c.acreedor, c.detalle, c.rubro].join(" ")).includes(w))))
+    .sort((a, b) => {
+      const va = a.vencimiento || "9999-99-99";
+      const vb = b.vencimiento || "9999-99-99";
+      return va < vb ? -1 : va > vb ? 1 : a.fecha < b.fecha ? -1 : 1;
+    });
+
+  function abrirPago(c) {
+    setError("");
+    setAbierta(c.id);
+    setPago({ cuentaId: c.id, fecha: todayStr(), monto: c.saldo, medioPago: mediosCaja[0] || "", observaciones: "", chequeNumero: "", chequeBanco: "", fechaVtoCheque: "" });
+  }
+  function guardarPago() {
+    setError("");
+    const c = cuentas.find((x) => x.id === pago.cuentaId);
+    const monto = Number(pago.monto) || 0;
+    if (!c) return;
+    if (monto <= 0) { setError("Indicá un monto mayor a cero."); return; }
+    if (monto > c.saldo + 0.01) { setError(`El pago (${money(monto)}) supera el saldo de la cuenta (${money(c.saldo)}).`); return; }
+    const cheque = medioFechaPropia(data, pago.medioPago);
+    if (cheque && !pago.fechaVtoCheque) { setError("Indicá la fecha de vencimiento del cheque."); return; }
+    update({ ...data, gastos: [crearGastoPago(c, pago, cheque), ...data.gastos] });
+    setPago(null);
+  }
+  function eliminarCuenta(id) {
+    update({
+      ...data,
+      cuentasPagar: (data.cuentasPagar || []).filter((c) => c.id !== id),
+      gastos: data.gastos.filter((g) => g.cuentaPagarId !== id),
+    });
+  }
+  const pagosDe = (id) => data.gastos.filter((g) => g.cuentaPagarId === id).sort((a, b) => (a.fecha < b.fecha ? -1 : 1));
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div>
+        <h1 style={{ fontSize: 21, fontWeight: 700, color: C.ink, margin: 0 }}>Cuentas a pagar</h1>
+        <p style={{ fontSize: 13, color: C.inkSoft, margin: "2px 0 0", maxWidth: 680 }}>
+          Lo que todavía le debés a proveedores y otros acreedores. Una deuda nace cuando cargás un gasto o una compra y pagás solo una parte; cada pago posterior se registra acá, o en Movimientos de Caja → "Pago de cuenta a pagar".
+        </p>
+      </div>
+
+      <div className="flex gap-4 flex-wrap">
+        <KPI label="Total a pagar" value={money(totalSaldo)} accent={C.rust} />
+        <KPI label="Vencido" value={money(vencido)} accent={C.gold} />
+        <KPI label="Próximos 30 días" value={money(prox30)} accent={C.ink} />
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <div style={{ position: "relative", flex: "1 1 240px", maxWidth: 380 }}>
+          <Search size={15} color={C.inkFaint} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }} />
+          <TextInput type="search" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} placeholder="Buscar por acreedor, detalle o rubro…" style={{ width: "100%", boxSizing: "border-box", paddingLeft: 32 }} />
+        </div>
+        <label className="flex items-center gap-2" style={{ fontSize: 13, color: C.inkSoft }}>
+          <input type="checkbox" checked={verSaldadas} onChange={(e) => setVerSaldadas(e.target.checked)} /> Ver también las saldadas
+        </label>
+      </div>
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <Tbl columns={8} style={{ fontSize: 13 }}>
+          <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
+            {["Fecha", "Acreedor", "Detalle", "Total", "Pagado", "Saldo", "Vencimiento", ""].map((h, i) => (
+              <TblTh key={i} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>
+            ))}
+          </TblHeadRow>
+          {filtradas.map((c) => {
+            const saldada = c.saldo <= 0.009;
+            const vencida = !saldada && c.vencimiento && c.vencimiento < hoy;
+            return (
+              <React.Fragment key={c.id}>
+                <TblRow onClick={() => { setAbierta(abierta === c.id ? null : c.id); setPago(null); setError(""); }} style={{ borderTop: `1px solid ${C.line}`, cursor: "pointer", background: abierta === c.id ? C.greenSoft : "transparent" }}>
+                  <TblCell data-label="Fecha" style={{ padding: "8px 12px" }}>{c.fecha}</TblCell>
+                  <TblCell data-label="Acreedor" style={{ padding: "8px 12px", fontWeight: 600 }}>{c.acreedor}</TblCell>
+                  <TblCell data-label="Detalle" style={{ padding: "8px 12px", color: C.inkSoft }}>{c.detalle || c.rubro}</TblCell>
+                  <TblCell data-label="Total" style={{ padding: "8px 12px" }}>{money(c.total)}</TblCell>
+                  <TblCell data-label="Pagado" style={{ padding: "8px 12px", color: C.inkSoft }}>{money(c.pagado)}</TblCell>
+                  <TblCell data-label="Saldo" style={{ padding: "8px 12px", fontWeight: 700, color: saldada ? C.green : C.rust }}>{saldada ? "Saldada" : money(c.saldo)}</TblCell>
+                  <TblCell data-label="Vencimiento" style={{ padding: "8px 12px", color: vencida ? C.rust : C.inkSoft }}>
+                    {c.vencimiento || "—"}{vencida && <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 600 }}>vencida</span>}
+                  </TblCell>
+                  <TblCell data-label="" style={{ padding: "8px 12px" }}>
+                    <span className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+                      {!saldada && <Button variant="ghost" style={{ padding: "3px 10px", fontSize: 12.5 }} onClick={() => abrirPago(c)}>Pagar</Button>}
+                      <Trash2 size={15} style={{ cursor: "pointer", color: C.inkFaint }} onClick={() => (!esAsesora ? setAvisoPermiso(true) : c.compraId ? setAvisoCompra(true) : setPendienteBorrar(c))} />
+                    </span>
+                  </TblCell>
+                </TblRow>
+                {abierta === c.id && (
+                  <TblRow>
+                    <TblCell style={{ gridColumn: "1 / -1", padding: "10px 16px", background: C.bg }}>
+                      <div style={{ fontSize: 12.5, color: C.inkSoft, marginBottom: 6 }}>
+                        Rubro: {c.rubro}{c.observaciones ? ` · ${c.observaciones}` : ""}{c.compraId ? " · viene de una compra de mercadería" : ""}
+                      </div>
+                      {pagosDe(c.id).length === 0 ? (
+                        <div style={{ fontSize: 13, color: C.inkFaint }}>Todavía no hay pagos registrados.</div>
+                      ) : (
+                        <div style={{ fontSize: 13 }}>
+                          {pagosDe(c.id).map((g) => (
+                            <div key={g.id} className="flex gap-3 flex-wrap" style={{ padding: "2px 0" }}>
+                              <span style={{ minWidth: 90 }}>{g.fecha}</span>
+                              <span style={{ minWidth: 90, fontWeight: 600 }}>{money(g.monto)}</span>
+                              <span style={{ color: C.inkSoft }}>{g.medioPago}{g.fechaVtoCheque ? ` · ${textoCheque(g)}` : ""}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {pago && pago.cuentaId === c.id && (
+                        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}` }}>
+                          <div className="flex flex-wrap gap-3 items-end">
+                            <Field label="Fecha"><TextInput type="date" value={pago.fecha} onChange={(e) => setPago({ ...pago, fecha: e.target.value })} /></Field>
+                            <Field label="Monto a pagar"><MoneyField value={pago.monto} onChange={(v) => setPago({ ...pago, monto: v })} style={{ width: 120 }} placeholder="0" /></Field>
+                            <Field label="Medio de pago">
+                              <Select value={pago.medioPago} onChange={(e) => setPago({ ...pago, medioPago: e.target.value })}>
+                                {mediosCaja.map((m) => <option key={m} value={m}>{m}</option>)}
+                              </Select>
+                            </Field>
+                            {medioFechaPropia(data, pago.medioPago) && (
+                              <>
+                                <Field label="N° de cheque"><TextInput value={pago.chequeNumero} onChange={(e) => setPago({ ...pago, chequeNumero: e.target.value })} style={{ width: 110 }} /></Field>
+                                <Field label="Banco"><TextInput value={pago.chequeBanco} onChange={(e) => setPago({ ...pago, chequeBanco: e.target.value })} style={{ width: 130 }} /></Field>
+                                <Field label="Fecha de vencimiento"><TextInput type="date" value={pago.fechaVtoCheque} onChange={(e) => setPago({ ...pago, fechaVtoCheque: e.target.value })} /></Field>
+                              </>
+                            )}
+                            <Button onClick={guardarPago}><Check size={15} /> Registrar pago</Button>
+                            <Button variant="ghost" onClick={() => { setPago(null); setError(""); }}>Cancelar</Button>
+                          </div>
+                          <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 8 }}>
+                            El pago se registra como un gasto del rubro {c.rubro} (también lo vas a ver en Gastos) y achica el saldo de esta cuenta.
+                          </div>
+                          {error && <div style={{ fontSize: 13, color: C.rust, fontWeight: 600, marginTop: 8 }}>{error}</div>}
+                        </div>
+                      )}
+                    </TblCell>
+                  </TblRow>
+                )}
+              </React.Fragment>
+            );
+          })}
+          {filtradas.length === 0 && (
+            <TblRow>
+              <TblCell style={{ gridColumn: "1 / -1", padding: 24, textAlign: "center", color: C.inkFaint }}>
+                {cuentas.length === 0
+                  ? "No tenés cuentas a pagar. Se crean al cargar un gasto o una compra con \"Pagado ahora\" menor al total."
+                  : "No hay cuentas pendientes con ese filtro."}
+              </TblCell>
+            </TblRow>
+          )}
+        </Tbl>
+      </Card>
+
+      {pendienteBorrar && (
+        <ConfirmDialog
+          mensaje={`¿Eliminar la cuenta de ${pendienteBorrar.acreedor} (${money(pendienteBorrar.total)})? También se eliminan sus ${pagosDe(pendienteBorrar.id).length} pago${pagosDe(pendienteBorrar.id).length === 1 ? "" : "s"} registrado${pagosDe(pendienteBorrar.id).length === 1 ? "" : "s"}, y esos gastos salen del flujo de fondos. No se puede deshacer.`}
+          onConfirmar={() => { eliminarCuenta(pendienteBorrar.id); setPendienteBorrar(null); }}
+          onCancelar={() => setPendienteBorrar(null)}
+        />
+      )}
+      {avisoPermiso && <AvisoPermisoDialog onCerrar={() => setAvisoPermiso(false)} />}
+      {avisoCompra && <AvisoPermisoDialog onCerrar={() => setAvisoCompra(false)} mensaje="Esta deuda viene de una compra de mercadería. Para eliminarla, eliminá la compra desde Productos y Stock → Compras: así también se corrige el stock." />}
+    </div>
+  );
+}
+
+// Arma el estado nuevo al registrar una compra (función pura, para poder probarla). Devuelve { error } o { data }.
+function registrarCompraDatos(data, form, lineas) {
+  const total = Math.round(lineas.reduce((a, l) => a + l.cantidad * l.costo, 0) * 100) / 100;
+  const pagadoNum = form.pagado === "" ? total : Number(form.pagado) || 0;
+  const resto = Math.round((total - pagadoNum) * 100) / 100;
+  const esChequeC = pagadoNum > 0 && medioFechaPropia(data, form.medioPago);
+  if (lineas.length === 0) return { error: "Agregá al menos un producto a la compra." };
+  if (lineas.some((l) => !(l.cantidad > 0))) return { error: "Hay un producto con cantidad cero: corregila o quitalo." };
+  if (pagadoNum > total + 0.001) return { error: "Lo pagado ahora no puede superar el total de la compra." };
+  if (resto > 0.009 && !String(form.proveedor || "").trim()) return { error: "Indicá el proveedor: queda un saldo a pagar." };
+  if (esChequeC && !form.fechaVtoCheque) return { error: "Indicá la fecha de vencimiento del cheque." };
+  const prov = acreedorCanonico(data.acreedores, form.proveedor);
+  const compraId = uid();
+  const cuentaId = resto > 0.009 ? uid() : null;
+  const detalle = `Compra${prov ? " a " + prov : ""}${form.comprobante ? " – " + form.comprobante : ""}`;
+  let gasto = null;
+  if (pagadoNum > 0) {
+    gasto = { id: uid(), fecha: form.fecha, rubro: form.rubro, detalle, monto: pagadoNum, medioPago: form.medioPago, observaciones: form.observaciones, compraId, ...(cuentaId ? { cuentaPagarId: cuentaId } : {}) };
+    if (esChequeC) { gasto.chequeNumero = form.chequeNumero; gasto.chequeBanco = form.chequeBanco; gasto.fechaVtoCheque = form.fechaVtoCheque; }
+  }
+  const cuenta = cuentaId ? { id: cuentaId, fecha: form.fecha, acreedor: prov, rubro: form.rubro, detalle: form.comprobante ? `Compra ${form.comprobante}` : "Compra de mercadería", total, vencimiento: form.vencimiento || "", observaciones: form.observaciones, compraId } : null;
+  let productos = data.productos.map((pr) => {
+    const ls = lineas.filter((l) => l.productoId === pr.id);
+    if (!ls.length) return pr;
+    const l = ls[ls.length - 1];
+    return { ...pr, stock: Number(pr.stock || 0) + ls.reduce((a, x) => a + x.cantidad, 0), ...(l.actualizarCosto ? { costo: l.costo } : {}) };
+  });
+  productos = recalcularProductos({ ...data, productos }).productos; // los precios automáticos siguen al costo nuevo
+  const movs = lineas.map((l) => ({ id: uid(), fecha: form.fecha, productoId: l.productoId, cantidad: l.cantidad, tipo: "carga", motivo: detalle, compraId }));
+  const compra = {
+    id: compraId, fecha: form.fecha, proveedor: prov, comprobante: form.comprobante, rubro: form.rubro, observaciones: form.observaciones,
+    total, pagado: pagadoNum, saldo: Math.max(0, resto), medioPago: pagadoNum > 0 ? form.medioPago : "", gastoId: gasto ? gasto.id : "", cuentaId: cuentaId || "",
+    lineas: lineas.map((l) => {
+      const pr = data.productos.find((x) => x.id === l.productoId);
+      return { productoId: l.productoId, nombre: l.nombre, cantidad: l.cantidad, costo: l.costo, costoAnterior: Number(pr?.costo) || 0, actualizoCosto: !!l.actualizarCosto };
+    }),
+  };
+  return {
+    data: {
+      ...data,
+      productos,
+      movStock: [...movs, ...(data.movStock || [])],
+      compras: [compra, ...(data.compras || [])],
+      gastos: gasto ? [gasto, ...data.gastos] : data.gastos,
+      cuentasPagar: cuenta ? [cuenta, ...(data.cuentasPagar || [])] : data.cuentasPagar || [],
+      acreedores: agregarAcreedor(data.acreedores, prov),
+    },
+  };
+}
+// Deshace una compra: devuelve el stock y elimina su gasto, su cuenta a pagar y los pagos posteriores. Los costos y
+// precios de los productos NO se revierten.
+function quitarCompraDatos(data, c) {
+  const cuentaId = c.cuentaId || null;
+  return {
+    ...data,
+    compras: (data.compras || []).filter((x) => x.id !== c.id),
+    gastos: data.gastos.filter((g) => g.compraId !== c.id && (!cuentaId || g.cuentaPagarId !== cuentaId)),
+    cuentasPagar: cuentaId ? (data.cuentasPagar || []).filter((x) => x.id !== cuentaId) : data.cuentasPagar || [],
+    productos: data.productos.map((pr) => {
+      const ls = (c.lineas || []).filter((l) => l.productoId === pr.id);
+      return ls.length ? { ...pr, stock: Number(pr.stock || 0) - ls.reduce((a, x) => a + x.cantidad, 0) } : pr;
+    }),
+    movStock: (data.movStock || []).filter((m) => m.compraId !== c.id),
+  };
+}
+
+// Compra de mercadería en un solo paso: carga el stock, actualiza el costo (y con él los precios automáticos) y registra
+// el pago. Lo pagado ahora es un gasto; el resto queda como cuenta a pagar al proveedor.
+function ComprasView({ data, update, esAsesora, palabras, iniciarAbierto }) {
+  const mediosCaja = data.medios.filter((m) => m !== MEDIO_CTA_CTE);
+  const rubroDefault = data.rubros.find((r) => normalizarTexto(r) === "insumos para venta") || data.rubros[0] || "";
+  const formVacio = () => ({ fecha: todayStr(), proveedor: "", comprobante: "", rubro: rubroDefault, pagado: "", medioPago: mediosCaja[0] || "", chequeNumero: "", chequeBanco: "", fechaVtoCheque: "", vencimiento: "", observaciones: "" });
+  const [form, setForm] = useState(iniciarAbierto ? formVacio() : null);
+  const [lineas, setLineas] = useState([]);
+  const [add, setAdd] = useState({ texto: "", selId: null, cantidad: 1, costo: "" });
+  const [error, setError] = useState("");
+  const [guardada, setGuardada] = useState(false);
+  const [abierta, setAbierta] = useState(null);
+  const [pendienteBorrar, setPendienteBorrar] = useState(null);
+  const [avisoPermiso, setAvisoPermiso] = useState(false);
+
+  const catalogo = data.productos.filter((p) => !esCombo(p)).map((p) => ({ ...p, tipoItem: "producto" }));
+  const textoAdd = add.texto.trim().toLowerCase();
+  const prodSel =
+    (add.selId ? catalogo.find((p) => p.id === add.selId && p.nombre.trim().toLowerCase() === textoAdd) : null) ||
+    catalogo.find((p) => (p.codigo && p.codigo.trim().toLowerCase() === textoAdd) || p.nombre.trim().toLowerCase() === textoAdd);
+  const total = Math.round(lineas.reduce((a, l) => a + l.cantidad * l.costo, 0) * 100) / 100;
+  const pagadoNum = !form ? 0 : form.pagado === "" ? total : Number(form.pagado) || 0;
+  const resto = Math.round((total - pagadoNum) * 100) / 100;
+  const esChequeC = !!form && pagadoNum > 0 && medioFechaPropia(data, form.medioPago);
+  const labels = data.listaLabels || LISTA_LABEL_DEFAULT;
+  const hayL2 = listasActivas(data).includes("mayorista");
+
+  // Cambios de costo y de precio que se van a aplicar (vista previa antes de confirmar)
+  const cambios = lineas
+    .filter((l) => l.actualizarCosto)
+    .map((l) => {
+      const pr = data.productos.find((x) => x.id === l.productoId);
+      if (!pr) return null;
+      const c = calcularPrecios({ ...pr, costo: l.costo }, data);
+      const l1a = Number(pr.precioMinorista) || 0, l1n = Number(c.precioMinorista) || 0;
+      const l2a = Number(pr.precioMayorista) || 0, l2n = Number(c.precioMayorista) || 0;
+      const sinPct = pr.markupPct === "" || pr.markupPct == null;
+      return { id: l.tempId, nombre: l.nombre, costoAntes: Number(pr.costo) || 0, costoNuevo: l.costo, l1a, l1n, l2a, l2n, manualL1: !!pr.manualL1, sinPct };
+    })
+    .filter((x) => x && (x.costoAntes !== x.costoNuevo || x.l1a !== x.l1n || x.l2a !== x.l2n));
+
+  function abrir() { setForm(formVacio()); setLineas([]); setError(""); setAdd({ texto: "", selId: null, cantidad: 1, costo: "" }); }
+  function cancelar() { setForm(null); setLineas([]); setError(""); }
+  function agregarLinea() {
+    setError("");
+    if (!prodSel) { setError("Elegí un producto de la lista."); return; }
+    const cant = Number(add.cantidad) || 0;
+    const costo = add.costo === "" ? NaN : Number(add.costo);
+    if (cant <= 0) { setError("Indicá una cantidad mayor a cero."); return; }
+    if (isNaN(costo) || costo < 0) { setError("Indicá el costo unitario de esta compra."); return; }
+    setLineas((prev) => {
+      const i = prev.findIndex((l) => l.productoId === prodSel.id);
+      if (i >= 0) return prev.map((l, j) => (j === i ? { ...l, cantidad: l.cantidad + cant, costo } : l));
+      return [...prev, { tempId: uid(), productoId: prodSel.id, nombre: prodSel.nombre, cantidad: cant, costo, actualizarCosto: true }];
+    });
+    setAdd({ texto: "", selId: null, cantidad: 1, costo: "" });
+  }
+  function confirmar() {
+    setError("");
+    const r = registrarCompraDatos(data, form, lineas);
+    if (r.error) { setError(r.error); return; }
+    update(r.data);
+    setForm(null);
+    setLineas([]);
+    setGuardada(true);
+    setTimeout(() => setGuardada(false), 3000);
+  }
+  function eliminarCompra(c) {
+    update(quitarCompraDatos(data, c));
+  }
+  const compras = [...(data.compras || [])]
+    .filter((c) => palabras.length === 0 || palabras.every((w) => normalizarTexto([c.proveedor, c.comprobante, ...(c.lineas || []).map((l) => l.nombre)].join(" ")).includes(w)))
+    .sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0));
+  const cuentaDe = (c) => (c.cuentaId ? (data.cuentasPagar || []).find((x) => x.id === c.cuentaId) : null);
+
+  return (
+    <>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div style={{ fontSize: 12.5, color: C.inkSoft, maxWidth: 680 }}>
+          Cargá la compra una sola vez: suma el stock, actualiza el costo (y con él los precios automáticos) y registra lo pagado. Lo que no pagás ahora queda como cuenta a pagar al proveedor.
+        </div>
+        {!form && <Button onClick={abrir}><Plus size={15} /> Registrar compra</Button>}
+      </div>
+      {guardada && <div style={{ fontSize: 13, color: C.green, fontWeight: 600 }}>✓ Compra registrada</div>}
+
+      {form && (
+        <Card style={{ padding: 18 }}>
+          <div style={{ fontWeight: 600, marginBottom: 12 }}>Nueva compra de mercadería</div>
+          <div className="flex flex-wrap gap-3 items-end">
+            <Field label="Fecha"><TextInput type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} /></Field>
+            <Field label="Proveedor">
+              <TextInput list="lista-acreedores-compra" value={form.proveedor} onChange={(e) => setForm({ ...form, proveedor: e.target.value })} style={{ width: 190 }} placeholder="Nombre del proveedor" />
+              <datalist id="lista-acreedores-compra">{(data.acreedores || []).map((a) => <option key={a} value={a} />)}</datalist>
+            </Field>
+            <Field label="N° de comprobante (opcional)"><TextInput value={form.comprobante} onChange={(e) => setForm({ ...form, comprobante: e.target.value })} style={{ width: 150 }} /></Field>
+            <Field label="Rubro del gasto">
+              <Select value={form.rubro} onChange={(e) => setForm({ ...form, rubro: e.target.value })}>
+                {data.rubros.map((r) => <option key={r} value={r}>{r}</option>)}
+              </Select>
+            </Field>
+          </div>
+
+          <div style={{ fontWeight: 600, fontSize: 13.5, margin: "16px 0 8px" }}>Productos comprados</div>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="flex flex-col gap-1 text-sm" style={{ color: C.inkSoft }}>
+              <span>Producto</span>
+              <BuscadorItem
+                items={catalogo}
+                valor={add.texto}
+                seleccionado={!!prodSel}
+                campoPrecio="costo"
+                onTexto={(t) => setAdd({ ...add, texto: t, selId: null })}
+                onElegir={(it) => setAdd({ ...add, texto: it.nombre, selId: it.id, costo: it.costo === "" || it.costo == null ? "" : it.costo })}
+              />
+            </div>
+            <Field label="Cantidad"><TextInput type="number" inputMode="numeric" min="1" value={add.cantidad} onChange={(e) => setAdd({ ...add, cantidad: e.target.value })} style={{ width: 90 }} /></Field>
+            <Field label="Costo unitario"><TextInput type="number" inputMode="decimal" min="0" value={add.costo} onChange={(e) => setAdd({ ...add, costo: e.target.value })} style={{ width: 120 }} /></Field>
+            <Button variant="ghost" onClick={agregarLinea}><Plus size={15} /> Agregar</Button>
+          </div>
+          {prodSel && <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>Stock actual: {Number(prodSel.stock || 0)} · costo actual: {Number(prodSel.costo) > 0 ? money(prodSel.costo) : "sin cargar"}</div>}
+
+          {lineas.length > 0 && (
+            <div style={{ marginTop: 12, border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+              <Tbl columns={6} style={{ fontSize: 13 }}>
+                <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
+                  {["Producto", "Cant.", "Costo unit.", "Subtotal", "Actualizar costo", ""].map((h, i) => <TblTh key={i} style={{ padding: "8px 10px", fontWeight: 600 }}>{h}</TblTh>)}
+                </TblHeadRow>
+                {lineas.map((l) => (
+                  <TblRow key={l.tempId} style={{ borderTop: `1px solid ${C.line}` }}>
+                    <TblCell data-label="Producto" style={{ padding: "6px 10px", fontWeight: 600 }}>{l.nombre}</TblCell>
+                    <TblCell data-label="Cant." style={{ padding: "6px 10px" }}>
+                      <TextInput type="number" min="1" value={l.cantidad} onChange={(e) => setLineas((p) => p.map((x) => (x.tempId === l.tempId ? { ...x, cantidad: Number(e.target.value) || 0 } : x)))} style={{ width: 70, padding: "4px 6px" }} />
+                    </TblCell>
+                    <TblCell data-label="Costo unit." style={{ padding: "6px 10px" }}>
+                      <TextInput type="number" min="0" value={l.costo} onChange={(e) => setLineas((p) => p.map((x) => (x.tempId === l.tempId ? { ...x, costo: Number(e.target.value) || 0 } : x)))} style={{ width: 100, padding: "4px 6px" }} />
+                    </TblCell>
+                    <TblCell data-label="Subtotal" style={{ padding: "6px 10px" }}>{money(l.cantidad * l.costo)}</TblCell>
+                    <TblCell data-label="Actualizar costo" style={{ padding: "6px 10px" }}>
+                      <input type="checkbox" checked={l.actualizarCosto} onChange={(e) => setLineas((p) => p.map((x) => (x.tempId === l.tempId ? { ...x, actualizarCosto: e.target.checked } : x)))} />
+                    </TblCell>
+                    <TblCell data-label="" style={{ padding: "6px 10px" }}>
+                      <X size={15} style={{ cursor: "pointer", color: C.inkFaint }} onClick={() => setLineas((p) => p.filter((x) => x.tempId !== l.tempId))} />
+                    </TblCell>
+                  </TblRow>
+                ))}
+              </Tbl>
+            </div>
+          )}
+
+          {cambios.length > 0 && (
+            <div style={{ marginTop: 12, padding: 12, background: C.bg, borderRadius: 10, fontSize: 12.5 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Cambios de costo y de precio que se van a aplicar</div>
+              {cambios.map((x) => (
+                <div key={x.id} style={{ padding: "2px 0", color: C.ink }}>
+                  <strong>{x.nombre}</strong>: costo {x.costoAntes > 0 ? money(x.costoAntes) : "sin cargar"} → {money(x.costoNuevo)}
+                  {x.l1a !== x.l1n && <> · {labels.minorista || LISTA_LABEL_DEFAULT.minorista}: {money(x.l1a)} → {money(x.l1n)}</>}
+                  {hayL2 && x.l2a !== x.l2n && <> · {labels.mayorista || LISTA_LABEL_DEFAULT.mayorista}: {money(x.l2a)} → {money(x.l2n)}</>}
+                  {x.l1a === x.l1n && x.manualL1 && <span style={{ color: C.inkSoft }}> · el precio es manual: no cambia</span>}
+                  {x.l1a === x.l1n && !x.manualL1 && x.sinPct && <span style={{ color: C.inkSoft }}> · sin % sobre costo: el precio no cambia</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ fontWeight: 600, fontSize: 13.5, margin: "16px 0 8px" }}>Pago</div>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div style={{ alignSelf: "center" }}>
+              <div style={{ fontSize: 11.5, color: C.inkSoft, textTransform: "uppercase", letterSpacing: 0.5 }}>Total de la compra</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: C.green }}>{money(total)}</div>
+            </div>
+            <Field label="Pagado ahora">
+              <TextInput type="number" inputMode="decimal" min="0" value={form.pagado} onChange={(e) => setForm({ ...form, pagado: e.target.value })} placeholder="Todo" style={{ width: 120 }} />
+            </Field>
+            {pagadoNum > 0 && (
+              <Field label="Medio de pago">
+                <Select value={form.medioPago} onChange={(e) => setForm({ ...form, medioPago: e.target.value })}>
+                  {mediosCaja.map((m) => <option key={m} value={m}>{m}</option>)}
+                </Select>
+              </Field>
+            )}
+            {esChequeC && (
+              <>
+                <Field label="N° de cheque"><TextInput value={form.chequeNumero} onChange={(e) => setForm({ ...form, chequeNumero: e.target.value })} style={{ width: 110 }} /></Field>
+                <Field label="Banco"><TextInput value={form.chequeBanco} onChange={(e) => setForm({ ...form, chequeBanco: e.target.value })} style={{ width: 130 }} /></Field>
+                <Field label="Fecha de vencimiento"><TextInput type="date" value={form.fechaVtoCheque} onChange={(e) => setForm({ ...form, fechaVtoCheque: e.target.value })} /></Field>
+              </>
+            )}
+            {resto > 0.009 && (
+              <Field label="Vencimiento del resto (opcional)"><TextInput type="date" value={form.vencimiento} onChange={(e) => setForm({ ...form, vencimiento: e.target.value })} /></Field>
+            )}
+          </div>
+          {resto > 0.009 && (
+            <div style={{ fontSize: 12.5, color: C.inkSoft, marginTop: 8 }}>
+              Se registra un gasto por {money(pagadoNum)} y quedan {money(resto)} como cuenta a pagar{form.proveedor.trim() ? ` a ${form.proveedor.trim()}` : ""}.
+            </div>
+          )}
+          <div style={{ marginTop: 10 }}>
+            <Field label="Observaciones (opcional)"><TextInput value={form.observaciones} onChange={(e) => setForm({ ...form, observaciones: e.target.value })} style={{ width: "100%", boxSizing: "border-box" }} /></Field>
+          </div>
+          {error && <div style={{ fontSize: 13, color: C.rust, fontWeight: 600, marginTop: 10 }}>{error}</div>}
+          <div className="flex gap-2" style={{ marginTop: 14 }}>
+            <Button onClick={confirmar}><Check size={15} /> Confirmar compra</Button>
+            <Button variant="ghost" onClick={cancelar}>Cancelar</Button>
+          </div>
+        </Card>
+      )}
+
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <Tbl columns={7} style={{ fontSize: 13 }}>
+          <TblHeadRow style={{ background: C.bg, textAlign: "left", color: C.inkSoft }}>
+            {["Fecha", "Proveedor", "Comprobante", "Ítems", "Total", "Saldo a pagar", ""].map((h, i) => <TblTh key={i} style={{ padding: "10px 12px", fontWeight: 600 }}>{h}</TblTh>)}
+          </TblHeadRow>
+          {compras.map((c) => {
+            const cu = cuentaDe(c);
+            const saldo = cu ? saldoCuenta(cu, data.gastos) : 0;
+            return (
+              <React.Fragment key={c.id}>
+                <TblRow onClick={() => setAbierta(abierta === c.id ? null : c.id)} style={{ borderTop: `1px solid ${C.line}`, cursor: "pointer", background: abierta === c.id ? C.greenSoft : "transparent" }}>
+                  <TblCell data-label="Fecha" style={{ padding: "8px 12px" }}>{c.fecha}</TblCell>
+                  <TblCell data-label="Proveedor" style={{ padding: "8px 12px", fontWeight: 600 }}>{c.proveedor || "—"}</TblCell>
+                  <TblCell data-label="Comprobante" style={{ padding: "8px 12px", color: C.inkSoft }}>{c.comprobante || "—"}</TblCell>
+                  <TblCell data-label="Ítems" style={{ padding: "8px 12px" }}>{(c.lineas || []).length}</TblCell>
+                  <TblCell data-label="Total" style={{ padding: "8px 12px", fontWeight: 600 }}>{money(c.total)}</TblCell>
+                  <TblCell data-label="Saldo a pagar" style={{ padding: "8px 12px", color: saldo > 0.009 ? C.rust : C.inkFaint }}>{saldo > 0.009 ? money(saldo) : "—"}</TblCell>
+                  <TblCell data-label="" style={{ padding: "8px 12px" }}>
+                    <Trash2 size={15} style={{ cursor: "pointer", color: C.inkFaint }} onClick={(e) => { e.stopPropagation(); esAsesora ? setPendienteBorrar(c) : setAvisoPermiso(true); }} />
+                  </TblCell>
+                </TblRow>
+                {abierta === c.id && (
+                  <TblRow>
+                    <TblCell style={{ gridColumn: "1 / -1", padding: "10px 16px", background: C.bg, fontSize: 13 }}>
+                      {(c.lineas || []).map((l, i) => (
+                        <div key={i} style={{ padding: "2px 0" }}>
+                          {l.cantidad} × {l.nombre} a {money(l.costo)}
+                          {l.actualizoCosto && l.costoAnterior !== l.costo && <span style={{ color: C.inkSoft }}> (costo anterior {l.costoAnterior > 0 ? money(l.costoAnterior) : "sin cargar"})</span>}
+                        </div>
+                      ))}
+                      <div style={{ marginTop: 6, color: C.inkSoft }}>Rubro: {c.rubro} · Pagado al cargar: {money(c.pagado)}{c.medioPago ? ` (${c.medioPago})` : ""}{c.observaciones ? ` · ${c.observaciones}` : ""}</div>
+                    </TblCell>
+                  </TblRow>
+                )}
+              </React.Fragment>
+            );
+          })}
+          {compras.length === 0 && (
+            <TblRow><TblCell style={{ gridColumn: "1 / -1", padding: 24, textAlign: "center", color: C.inkFaint }}>{(data.compras || []).length === 0 ? "Todavía no registraste ninguna compra." : "Ninguna compra coincide con la búsqueda."}</TblCell></TblRow>
+          )}
+        </Tbl>
+      </Card>
+
+      {pendienteBorrar && (
+        <ConfirmDialog
+          mensaje={`¿Eliminar la compra del ${pendienteBorrar.fecha}${pendienteBorrar.proveedor ? " a " + pendienteBorrar.proveedor : ""} (${money(pendienteBorrar.total)})? Se descuenta del stock lo que sumó y se eliminan su gasto, su cuenta a pagar y los pagos posteriores que tenga. Los costos y precios de los productos NO vuelven solos al valor anterior. No se puede deshacer.`}
+          onConfirmar={() => { eliminarCompra(pendienteBorrar); setPendienteBorrar(null); }}
+          onCancelar={() => setPendienteBorrar(null)}
+        />
+      )}
+      {avisoPermiso && <AvisoPermisoDialog onCerrar={() => setAvisoPermiso(false)} />}
+    </>
+  );
+}
+
 /* ---------- Movimientos de Caja ---------- */
 function MovimientosView({ data, update }) {
   const [kind, setKind] = useState("motivo");
@@ -4827,7 +5440,14 @@ function MovimientosView({ data, update }) {
     medioDestino: mediosCaja[1] || mediosCaja[0] || "",
     observaciones: "",
     clienteId: "",
+    cuentaId: "",
+    chequeNumero: "",
+    chequeBanco: "",
+    fechaVtoCheque: "",
   });
+  const cuentasAbiertas = (data.cuentasPagar || [])
+    .map((c) => ({ ...c, saldo: saldoCuenta(c, data.gastos) }))
+    .filter((c) => c.saldo > 0.009);
 
   const motivo = MOTIVOS_MOVIMIENTO.find((m) => m.id === form.motivoId) || MOTIVOS_MOVIMIENTO[0];
 
@@ -4836,6 +5456,19 @@ function MovimientosView({ data, update }) {
     try {
       const monto = Number(form.monto) || 0;
       if (!monto) { setLocalError("Falta indicar un monto mayor a cero."); return; }
+      if (kind === "motivo" && motivo?.esPagoCuenta) {
+        // El pago se registra como un gasto pagado (rubro de la cuenta) que achica el saldo; no crea un movimiento.
+        const cuenta = cuentasAbiertas.find((c) => c.id === form.cuentaId);
+        if (!cuenta) { setLocalError("Elegí la cuenta a pagar."); return; }
+        if (monto > cuenta.saldo + 0.01) { setLocalError(`El pago (${money(monto)}) supera el saldo de la cuenta (${money(cuenta.saldo)}).`); return; }
+        const cheque = medioFechaPropia(data, form.medioPago);
+        if (cheque && !form.fechaVtoCheque) { setLocalError("Indicá la fecha de vencimiento del cheque."); return; }
+        update({ ...data, gastos: [crearGastoPago(cuenta, { ...form, monto }, cheque), ...data.gastos] });
+        setForm((f) => ({ ...f, monto: "", observaciones: "", cuentaId: "", chequeNumero: "", chequeBanco: "", fechaVtoCheque: "" }));
+        setJustSaved(true);
+        setTimeout(() => setJustSaved(false), 2500);
+        return;
+      }
       if (motivo?.requiereCliente && !form.clienteId) { setLocalError("Este motivo requiere elegir un cliente."); return; }
       let nuevo;
       if (kind === "transferencia") {
@@ -4878,6 +5511,10 @@ function MovimientosView({ data, update }) {
         medioDestino: mediosCaja[1] || mediosCaja[0] || "",
         observaciones: "",
         clienteId: "",
+        cuentaId: "",
+        chequeNumero: "",
+        chequeBanco: "",
+        fechaVtoCheque: "",
       });
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 2500);
@@ -4926,11 +5563,33 @@ function MovimientosView({ data, update }) {
                   </Select>
                 </Field>
               )}
+              {motivo?.esPagoCuenta && (
+                <Field label="Cuenta a pagar">
+                  <Select
+                    value={form.cuentaId}
+                    onChange={(e) => {
+                      const c = cuentasAbiertas.find((x) => x.id === e.target.value);
+                      setForm({ ...form, cuentaId: e.target.value, monto: c ? c.saldo : form.monto });
+                    }}
+                    style={{ minWidth: 260 }}
+                  >
+                    <option value="">{cuentasAbiertas.length ? "Elegir..." : "No hay cuentas pendientes"}</option>
+                    {cuentasAbiertas.map((c) => <option key={c.id} value={c.id}>{`${c.acreedor} · ${c.detalle || c.rubro} · saldo ${money(c.saldo)}`}</option>)}
+                  </Select>
+                </Field>
+              )}
               <Field label="Medio de pago">
                 <Select value={form.medioPago} onChange={(e) => setForm({ ...form, medioPago: e.target.value })}>
                   {mediosCaja.map((m) => <option key={m} value={m}>{m}</option>)}
                 </Select>
               </Field>
+              {motivo?.esPagoCuenta && medioFechaPropia(data, form.medioPago) && (
+                <>
+                  <Field label="N° de cheque"><TextInput value={form.chequeNumero} onChange={(e) => setForm({ ...form, chequeNumero: e.target.value })} style={{ width: 110 }} /></Field>
+                  <Field label="Banco"><TextInput value={form.chequeBanco} onChange={(e) => setForm({ ...form, chequeBanco: e.target.value })} style={{ width: 130 }} /></Field>
+                  <Field label="Fecha de vencimiento"><TextInput type="date" value={form.fechaVtoCheque} onChange={(e) => setForm({ ...form, fechaVtoCheque: e.target.value })} /></Field>
+                </>
+              )}
             </>
           ) : (
             <>
@@ -5562,6 +6221,8 @@ function ConfigView({ data, update, esAsesora, linkInstructivo, instructivoGloba
     hoja("Productos", data.productos.filter((p) => !esCombo(p)));
     hoja("Servicios y Sillón-Gab", data.servicios || []);
     hoja("Staff", data.staff || []);
+    hoja("Compras", (data.compras || []).map((c) => ({ ...c, lineas: (c.lineas || []).map((l) => `${l.nombre} x${l.cantidad} a ${l.costo}`).join("; ") })));
+    hoja("Cuentas a pagar", (data.cuentasPagar || []).map((c) => ({ ...c, pagado: pagadoCuenta(c, data.gastos), saldo: saldoCuenta(c, data.gastos) })));
     hoja(
       "Combos",
       data.productos.filter(esCombo).map((p) => {
@@ -6142,6 +6803,7 @@ export function Negocio({ data, update, cabecera, esAsesora, instructivoGlobal =
     dashboard: <Dashboard data={data} />,
     ventas: <VentasView data={data} update={update} esAsesora={esAsesora} />,
     gastos: <GastosView data={data} update={update} esAsesora={esAsesora} />,
+    cuentaspagar: <CuentasPagarView data={data} update={update} esAsesora={esAsesora} />,
     movimientos: <MovimientosView data={data} update={update} />,
     clientes: <ClientesView data={data} update={update} />,
     staff: <StaffView data={data} />,
