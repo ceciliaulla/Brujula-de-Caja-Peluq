@@ -2692,7 +2692,7 @@ function ComboDetalle({ combo, data, disponible, incluye, onGuardar, onEliminar,
   );
 }
 
-function ProductosView({ data, update }) {
+function ProductosView({ data, update, esAsesora }) {
   const esMobile = useEsMobile();
   const [detalleId, setDetalleId] = useState(null); // producto/combo abierto en la pantalla de detalle
   const [eliminarPendiente, setEliminarPendiente] = useState(null); // ítem a confirmar antes de borrar desde la tabla
@@ -6808,7 +6808,7 @@ export function Negocio({ data, update, cabecera, esAsesora, instructivoGlobal =
     clientes: <ClientesView data={data} update={update} />,
     staff: <StaffView data={data} />,
     arqueo: <ArqueoView data={data} update={update} />,
-    productos: <ProductosView data={data} update={update} />,
+    productos: <ProductosView data={data} update={update} esAsesora={esAsesora} />,
     importar: <ImportarView data={data} update={update} />,
     config: <ConfigView data={data} update={update} esAsesora={esAsesora} linkInstructivo={linkInstructivo} instructivoGlobal={instructivoGlobal} onGuardarInstructivoGlobal={onGuardarInstructivoGlobal} />,
   };
